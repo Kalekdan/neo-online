@@ -814,12 +814,14 @@ async function renderShelves() {
       // files from Finder → import them right onto this shelf
       if (e.dataTransfer.files && e.dataTransfer.files.length) {
         e.preventDefault();
-        const paths = [...e.dataTransfer.files]
+        const files = [...e.dataTransfer.files];
+        const paths = files
           .map((f) => { try { return window.neo.pathForFile(f); } catch { return null; } })
           .filter(Boolean);
-        if (!paths.length) return;
+        const sources = paths.length ? paths : files;
+        if (!sources.length) return;
         toast(t('Importing…'));
-        const results = await window.neo.importFiles(paths);
+        const results = await window.neo.importFiles(sources);
         if (!results.length) { toast(t('No .docx, .txt, or .md files in that drop')); return; }
         await addImportedBooks(results, shelf);
         return;
@@ -1641,20 +1643,22 @@ function bookTile(meta, opts = {}) {
     if (!e.dataTransfer.files || !e.dataTransfer.files.length) return;
     e.preventDefault();
     e.stopPropagation();
+    const file = e.dataTransfer.files[0];
     let p = null;
-    try { p = window.neo.pathForFile(e.dataTransfer.files[0]); } catch { /* no path */ }
-    if (!p) return;
-    if (/\.(png|jpe?g|webp)$/i.test(p)) {
-      const fname = await window.neo.setCover(meta.id, p);
+    try { p = window.neo.pathForFile(file); } catch { /* no path */ }
+    const source = p || file;
+    const name = p || file.name;
+    if (/\.(png|jpe?g|webp)$/i.test(name)) {
+      const fname = await window.neo.setCover(meta.id, source);
       if (fname) {
         meta.coverImage = fname;
         meta.coverMode = 'image';
         await writeBookMeta(meta.id, meta);
         renderShelves();
       }
-    } else if (/\.(docx|txt|md)$/i.test(p)) {
+    } else if (/\.(docx|txt|md)$/i.test(name)) {
       const homeShelf = library.shelves.find((s) => s.bookIds.includes(meta.id)) || library.shelves[0];
-      const results = await window.neo.importFiles([p]);
+      const results = await window.neo.importFiles([source]);
       if (results.length) await addImportedBooks(results, homeShelf);
     }
   });
@@ -5418,7 +5422,8 @@ function buildWebMenu() {
       { label: 'Cut', action: edit('cut') }, { label: 'Copy', action: edit('copy') }, { label: 'Paste', action: edit('paste') },
       { label: 'Paste and Match Style', action: edit('insertText') }, { label: 'Select All', action: edit('selectAll') }, null,
       { label: 'Find & Replace', shortcut: 'Ctrl+F', action: { type: 'find' } },
-      { label: 'Spellcheck Pass', shortcut: 'Ctrl+;', action: { type: 'spellcheck' } }
+      { label: 'Spellcheck Pass', shortcut: 'Ctrl+;', action: { type: 'spellcheck' } },
+      { label: 'Spellcheck Language', items: [['en-US', 'US English'], ['en-GB', 'UK English'], ['en-CA', 'Canadian English'], ['en-AU', 'Australian English'], ['fr', 'French'], ['es', 'Spanish'], ['de', 'German'], ['nl', 'Dutch'], ['pl', 'Polish'], ['pt-BR', 'Brazilian Portuguese'], ['ro', 'Romanian'], ['ru', 'Russian']].map(([value, label]) => ({ label, action: { type: 'spellLanguage', value } })) }
     ] },
     { label: 'Format', items: [
       { label: 'Body Font', items: (IS_MAC ? ['Georgia', 'Palatino', 'Baskerville', 'Hoefler Text', 'Iowan Old Style', 'Jost'] : ['Georgia', 'Palatino', 'Baskerville', 'Cambria', 'Constantia', 'Jost']).map((font) => ({ label: font, action: { type: 'bodyFont', value: font } })) },

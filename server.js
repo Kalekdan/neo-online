@@ -7,11 +7,49 @@
 const http = require('http');
 const path = require('path');
 const fs = require('fs');
+const { Worker } = require('worker_threads');
 
 const ROOT = __dirname;
 const PORT = Number(process.env.PORT || 3000);
 const LIBRARY_DIR = path.resolve(process.env.NEO_LIBRARY_DIR || path.join(ROOT, 'NEO Library'));
 const LIBRARY_FILE = path.join(LIBRARY_DIR, 'library.json');
+const SPELL_LANGUAGES = {
+  'en-US': 'dictionary-en-us', 'en-GB': 'dictionary-en-gb', 'en-CA': 'dictionary-en-ca', 'en-AU': 'dictionary-en-au',
+  fr: 'dictionary-fr', es: 'dictionary-es', de: 'dictionary-de', nl: 'dictionary-nl', pl: 'dictionary-pl',
+  'pt-BR': 'dictionary-pt', ro: 'dictionary-ro', ru: 'dictionary-ru'
+};
+let spellWorker = null;
+let spellSequence = 0;
+const spellWaiting = new Map();
+let spellLanguage = null;
+function startSpellWorker() {
+  if (spellWorker) return;
+  spellWorker = new Worker(path.join(ROOT, 'spell-worker.js'));
+  spellWorker.on('message', (message) => { const done = spellWaiting.get(message.id); if (done) { spellWaiting.delete(message.id); done(message); } });
+  spellWorker.on('error', (error) => { for (const done of spellWaiting.values()) done({ ok: false, error: error.message }); spellWaiting.clear(); spellWorker = null; });
+  spellWorker.on('exit', () => { for (const done of spellWaiting.values()) done({ ok: false, error: 'spell worker exited' }); spellWaiting.clear(); spellWorker = null; });
+}
+function spellRequest(message) {
+  startSpellWorker();
+  return new Promise((resolve) => { const id = ++spellSequence; spellWaiting.set(id, resolve); spellWorker.postMessage({ ...message, id }); });
+}
+async function loadSpellDictionary(code) {
+  const language = SPELL_LANGUAGES[code] ? code : 'en-US';
+  const custom = readJSON(LIBRARY_FILE, {}).customWords || [];
+  const result = await spellRequest({ type: 'load', language: language === 'pt-BR' ? 'pt-BR' : language, dir: path.join(ROOT, 'node_modules', SPELL_LANGUAGES[language]), custom });
+  if (result.ok) spellLanguage = language;
+  return result.ok;
+}
+async function ensureSpellDictionary() {
+  if (spellLanguage) return true;
+  const saved = readJSON(LIBRARY_FILE, {}).spellLanguage;
+  return loadSpellDictionary(SPELL_LANGUAGES[saved] ? saved : 'en-US');
+}
+async function spellCheck(words) {
+  if (!(await ensureSpellDictionary())) return Object.fromEntries((words || []).map((word) => [word, true]));
+  const result = await spellRequest({ type: 'check', words });
+  return result.ok ? result.result : Object.fromEntries((words || []).map((word) => [word, true]));
+}
 
 const DEFAULT_LIBRARY = () => ({ authorName: '', penNames: [], firstRunDone: false, pageTheme: 'night', shelves: [{ id: 'shelf-1', name: 'Works in Progress', bookIds: [] }] });
 function safeName(value) {
@@ -82,9 +120,10 @@ async function operation(op, args) {
     case 'writeUploadedCover': { const ext = String(b).split('.').pop().toLowerCase(); if (!['png', 'jpg', 'jpeg', 'webp'].includes(ext)) throw new Error('Unsupported cover image'); const file = 'cover-' + Date.now() + '.' + (ext === 'jpeg' ? 'jpg' : ext); fs.writeFileSync(bookPath(a, file), Buffer.from(c, 'base64')); return file; }
     case 'hasSecret': return false;
     case 'setSecret': return false;
-    case 'spellCheckWords': return Object.fromEntries((a || []).map((word) => [word, true]));
-    case 'spellSuggest': return [];
-    case 'spellLearn': case 'setSpellLanguage': return true;
+    case 'spellCheckWords': return spellCheck(a || []);
+    case 'spellSuggest': { if (!(await ensureSpellDictionary())) return []; const result = await spellRequest({ type: 'suggest', word: a }); return result.ok ? result.result : []; }
+    case 'spellLearn': { if (typeof a === 'string' && await ensureSpellDictionary()) await spellRequest({ type: 'add', word: a }); return true; }
+    case 'setSpellLanguage': { if (!SPELL_LANGUAGES[a]) return false; return loadSpellDictionary(a); }
     case 'appVersion': return 'NEO online';
     case 'checkForUpdate': return { error: true };
     case 'fullscreenEscape': case 'fullscreenToggle': return false;

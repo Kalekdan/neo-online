@@ -55,7 +55,7 @@ filesystem operation. The important replacements are:
 | Electron cover picker and `webUtils.getPathForFile` | Browser file picker plus base64 upload via `op: "writeUploadedCover"`; no client filesystem path is used |
 | `window.neo.exportSave(...)` | Text exports download in the browser; DOCX/EPUB `zipEntries` are sent to `op: "exportZip"` and downloaded; PDF is unavailable without Electron's Chromium PDF printer |
 | Electron import dialog and `importFiles(paths)` | Browser file picker sends base64 file contents to `op: "importFiles"`; `.txt` and `.md` are supported by the web server |
-| Electron menu, updater, secrets, spell worker, and email integration | Browser bridge supplies no-op or browser equivalents: fullscreen uses the Web API, email uses `mailto:`, spellcheck is intentionally non-invasive, and API-key painting is disabled |
+| Electron menu, updater, secrets, spell worker, and email integration | Browser equivalents: the web menu mirrors the Electron menu, fullscreen uses the Web API, email uses `mailto:`, spellcheck uses the same bundled Hunspell dictionaries through the server, and API-key painting is disabled |
 
 The browser server does not expose arbitrary filesystem paths or arbitrary
 URLs. The only disk operations are the named library operations in

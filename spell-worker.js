@@ -13,6 +13,7 @@ const fs = require('fs');
 const path = require('path');
 const { loadModule } = require('@farscrl/hunspell-wasm');
 const { normalizeRomanianWord } = require('./spell-ro');
+const parentPort = process.parentPort || require('worker_threads').parentPort;
 
 let factory = null;       // the WebAssembly module, loaded once
 let spell = null;         // { hunspell, files } for the current language
@@ -20,7 +21,7 @@ let normalizeWord = (word) => word;
 let mounts = 0;
 
 function reply(msg, extra) {
-  process.parentPort.postMessage({ id: msg.id, ...extra });
+  parentPort.postMessage({ id: msg.id, ...extra });
 }
 
 function correct(word) {
@@ -85,7 +86,7 @@ async function handle(msg) {
 // One message at a time, in the order they came: a check sent after a load
 // is answered by the new dictionary, never by a half-loaded one.
 let queue = Promise.resolve();
-process.parentPort.on('message', (e) => {
-  const msg = e.data || {};
+parentPort.on('message', (e) => {
+  const msg = e && e.data ? e.data : (e || {});
   queue = queue.then(() => handle(msg));
 });
