@@ -18,6 +18,7 @@ if (!window.neo) {
       let message = null;
       if (!e.shiftKey && key === 'e') message = { type: 'emailDraft' };
       else if (!e.shiftKey && key === ',') message = { type: 'stats' };
+      else if (e.code === 'Semicolon') message = { type: 'spellcheck' };
       else if (e.shiftKey && key === 'i') message = { type: 'import' };
       else if (!e.shiftKey && key === 'f') message = { type: 'find' };
       else if (!e.shiftKey && key === '/') message = { type: 'help' };
