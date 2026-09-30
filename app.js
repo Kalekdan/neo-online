@@ -5386,6 +5386,89 @@ $('#paper-scroll').addEventListener('scroll', () => {
   }, 120);
 });
 
+function buildWebMenu() {
+  const emit = (message) => document.dispatchEvent(new CustomEvent('neo-menu', { detail: message }));
+  const edit = (command) => () => document.execCommand(command);
+  const menu = [
+    { label: 'File', items: [
+      { label: 'Export', items: [
+        { label: 'Plain Text (.txt)', action: { type: 'export', format: 'txt' } },
+        { label: 'Markdown (.md)', action: { type: 'export', format: 'md' } },
+        { label: 'Web Page (.html)', action: { type: 'export', format: 'html' } },
+        { label: 'PDF (.pdf)', action: { type: 'export', format: 'pdf' } },
+        { label: 'Word (.docx)', action: { type: 'export', format: 'docx' } },
+        { label: 'EPUB (.epub)', action: { type: 'export', format: 'epub' } }
+      ] },
+      null,
+      { label: 'Email Draft to Myself', shortcut: 'Ctrl+E', action: { type: 'emailDraft' } },
+      { label: 'Email Settings…', action: { type: 'emailSettings' } },
+      { label: 'Cover Art…', action: { type: 'coverArt' } },
+      { label: 'Goals…', shortcut: 'Ctrl+,', action: { type: 'stats' } },
+      { label: 'New Books Open To', items: [
+        { label: 'Blank Page', action: { type: 'writingStyle', value: 'pantser' } },
+        { label: 'Outline First', action: { type: 'writingStyle', value: 'plotter' } }
+      ] },
+      null,
+      { label: 'Import Manuscripts…', shortcut: 'Ctrl+Shift+I', action: { type: 'import' } },
+      { label: 'Reshelve a Book…', action: { type: 'reshelve' } },
+      { label: 'Library Folder…', action: () => toast(t('The browser server owns the library folder')) }
+    ] },
+    { label: 'Edit', items: [
+      { label: 'Undo', action: edit('undo') }, { label: 'Redo', action: edit('redo') }, null,
+      { label: 'Cut', action: edit('cut') }, { label: 'Copy', action: edit('copy') }, { label: 'Paste', action: edit('paste') },
+      { label: 'Paste and Match Style', action: edit('insertText') }, { label: 'Select All', action: edit('selectAll') }, null,
+      { label: 'Find & Replace', shortcut: 'Ctrl+F', action: { type: 'find' } },
+      { label: 'Spellcheck Pass', shortcut: 'Ctrl+;', action: { type: 'spellcheck' } }
+    ] },
+    { label: 'Format', items: [
+      { label: 'Body Font', items: (IS_MAC ? ['Georgia', 'Palatino', 'Baskerville', 'Hoefler Text', 'Iowan Old Style', 'Jost'] : ['Georgia', 'Palatino', 'Baskerville', 'Cambria', 'Constantia', 'Jost']).map((font) => ({ label: font, action: { type: 'bodyFont', value: font } })) },
+      { label: 'Drop Cap Style', items: [
+        { label: 'Literary', action: { type: 'dropCap', value: 'literary' } }, { label: 'Fantasy', action: { type: 'dropCap', value: 'fantasy' } },
+        { label: 'Sci-Fi', action: { type: 'dropCap', value: 'scifi' } }, { label: 'Off', action: { type: 'dropCap', value: 'none' } }
+      ] },
+      { label: 'Align Paragraph', items: [
+        { label: 'Left', shortcut: 'Ctrl+Shift+L', action: { type: 'align', value: 'left' } }, { label: 'Center', shortcut: 'Ctrl+Shift+C', action: { type: 'align', value: 'center' } },
+        { label: 'Right', shortcut: 'Ctrl+Shift+R', action: { type: 'align', value: 'right' } }, { label: 'Justify', shortcut: 'Ctrl+Shift+J', action: { type: 'align', value: 'justify' } }
+      ] }, null,
+      { label: 'Larger Text', shortcut: 'Ctrl++', action: { type: 'fontSize', value: 1 } }, { label: 'Smaller Text', shortcut: 'Ctrl+-', action: { type: 'fontSize', value: -1 } },
+      { label: 'Reset Text Size', shortcut: 'Ctrl+0', action: { type: 'fontSize', value: 0 } }, null,
+      { label: 'Typewriter Scrolling', shortcut: 'Ctrl+Shift+T', action: { type: 'typewriter' } },
+      { label: 'Poetry Paragraph', action: { type: 'poetry' } }, { label: 'Markdown Emphasis', action: { type: 'markdownEmphasis', checked: true } }
+    ] },
+    { label: 'View', items: [
+      { label: 'Keyboard Shortcuts…', shortcut: 'Ctrl+/', action: { type: 'help' } }, null,
+      { label: 'Full Screen', shortcut: 'Ctrl+Shift+F', action: () => window.neo.fullscreenToggle() },
+      { label: 'Focus Mode', items: [
+        { label: 'Cycle', shortcut: 'Ctrl+Shift+O', action: { type: 'focusCycle' } },
+        { label: 'Sentence', action: { type: 'focus', value: 'sentence' } }, { label: 'Paragraph', action: { type: 'focus', value: 'paragraph' } }, { label: 'Off', action: { type: 'focus', value: 'off' } }
+      ] },
+      { label: 'Vim Keys', action: { type: 'vim' } },
+      { label: 'Page', items: [
+        { label: 'Night', action: { type: 'pageTheme', value: 'night' } }, { label: 'Paper', action: { type: 'pageTheme', value: 'paper' } }, { label: 'Light', action: { type: 'pageTheme', value: 'light' } }
+      ] },
+      { label: 'Brighter Interface', action: { type: 'uiBright' } },
+      { label: 'Interface Size', items: [1, 1.25, 1.5, 2, 2.5, 3].map((size) => ({ label: size === 1 ? 'Normal' : `${size * 100}%`, action: { type: 'uiZoom', value: size } })) },
+      { label: 'Language', items: [['en', 'English'], ['de', 'Deutsch'], ['es', 'Español'], ['fr', 'Français'], ['it', 'Italiano'], ['pt', 'Português'], ['ru', 'Русский']].map(([value, label]) => ({ label, action: { type: 'uiLanguage', value } })) }
+    ] },
+    { label: 'Window', items: [{ label: 'Minimize', action: () => toast(t('The browser controls the window')) }, { label: 'Zoom', action: () => document.documentElement.requestFullscreen?.() }, { label: 'Close', action: () => window.close() }] },
+    { label: 'Help', items: [{ label: 'NEO Shortcuts', action: { type: 'help' } }, null, { label: 'About NEO', action: { type: 'about' } }, { label: 'Check for Update…', action: { type: 'checkUpdate' } }] }
+  ];
+  const bar = $('#web-menubar');
+  const render = (items, parent) => items.forEach((item) => {
+    if (!item) { const separator = document.createElement('div'); separator.className = 'web-menu-separator'; parent.append(separator); return; }
+    const wrap = document.createElement('div'); wrap.className = 'web-menu-item';
+    const button = document.createElement('button'); button.type = 'button'; button.textContent = t(item.label);
+    if (item.shortcut) { const key = document.createElement('span'); key.textContent = item.shortcut; key.className = 'web-menu-shortcut'; button.append(key); }
+    wrap.append(button);
+    if (item.items) { wrap.classList.add('has-submenu'); const panel = document.createElement('div'); panel.className = 'web-menu-panel'; render(item.items, panel); wrap.append(panel); }
+    else button.addEventListener('click', () => { document.querySelectorAll('.web-menu.open').forEach((open) => open.classList.remove('open')); if (typeof item.action === 'function') item.action(); else emit(item.action); });
+    parent.append(wrap);
+  });
+  menu.forEach((entry) => { const wrap = document.createElement('div'); wrap.className = 'web-menu'; const button = document.createElement('button'); button.type = 'button'; button.textContent = t(entry.label); const panel = document.createElement('div'); panel.className = 'web-menu-panel'; render(entry.items, panel); wrap.append(button, panel); button.addEventListener('click', () => { document.querySelectorAll('.web-menu.open').forEach((open) => { if (open !== wrap) open.classList.remove('open'); }); wrap.classList.toggle('open'); }); bar.append(wrap); });
+  document.addEventListener('click', (event) => { if (!event.target.closest('#web-menubar')) document.querySelectorAll('.web-menu.open').forEach((open) => open.classList.remove('open')); });
+}
+buildWebMenu();
+
 /* ================================================================== */
 /*  SAVING                                                             */
 /* ================================================================== */

@@ -2,6 +2,8 @@
 // first, so this file is intentionally a no-op in the desktop app.
 if (!window.neo) {
   (() => {
+    document.documentElement.classList.add('web-version');
+    document.getElementById('web-menubar')?.removeAttribute('hidden');
     const call = (op, ...args) => fetch('/api', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ op, args }) }).then((r) => r.json()).then((r) => { if (!r.ok) throw new Error(r.error); return r.value; });
     const locale = (() => { try { const x = new XMLHttpRequest(); x.open('GET', '/locales/en.json', false); x.send(); return { locale: 'en', dict: {}, base: x.status === 200 ? JSON.parse(x.responseText) : {} }; } catch { return { locale: 'en', dict: {}, base: {} }; } })();
     const chooseFile = (accept) => new Promise((resolve) => { const input = document.createElement('input'); input.type = 'file'; input.accept = accept; input.onchange = () => resolve(input.files[0] || null); input.click(); });
@@ -50,5 +52,6 @@ if (!window.neo) {
       fullscreenEscape: () => document.fullscreenElement ? document.exitFullscreen().then(() => true) : Promise.resolve(false), fullscreenToggle: () => document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen(), checkForUpdate: () => call('checkForUpdate'), installUpdate: () => false, appVersion: () => call('appVersion'), openRelease: () => true,
       spellCheckWords: (x) => call('spellCheckWords', x), spellSuggest: (x) => call('spellSuggest', x), spellLearn: (x) => call('spellLearn', x), setSpellLanguage: (x) => call('setSpellLanguage', x), logError: (x) => call('logError', x), onMenu: (callback) => { menuHandler = callback; }, reloadForLanguage: () => location.reload(), poetryState: () => {}, typewriterState: () => {}, vimState: () => {}, uiZoomState: () => {}, writingStyleState: () => {}, viewState: () => {}
     };
+    document.addEventListener('neo-menu', (e) => { if (menuHandler) menuHandler(e.detail); });
   })();
 }

@@ -34,6 +34,43 @@ button { font: inherit; cursor: pointer; }
 [hidden] { display: none !important; }
 .soft { color: var(--muted); font-size: 12px; }
 
+/* The browser has no native Electron menu, so web-bridge.js enables this bar. */
+#web-menubar {
+  display: none;
+  position: fixed; top: 0; left: 0; right: 0; z-index: 600;
+  height: 30px; padding: 0 8px; align-items: stretch;
+  background: var(--bg-soft); border-bottom: 1px solid #343434;
+  -webkit-app-region: no-drag;
+  width: 100%;
+}
+html.web-version #web-menubar { display: flex; }
+.web-menu { position: relative; }
+.web-menu > button {
+  height: 100%; padding: 0 12px; border: 0; background: none;
+  color: #cfcfcf; font-size: 12px;
+}
+.web-menu > button:hover, .web-menu.open > button { background: #343434; color: #fff; }
+.web-menu-panel {
+  display: none; position: absolute; top: 30px; left: 0; min-width: 220px;
+  padding: 5px; background: #242424; border: 1px solid #414141;
+  box-shadow: 0 8px 24px rgba(0,0,0,.42);
+}
+.web-menu.open > .web-menu-panel { display: block; }
+.web-menu-item { position: relative; }
+.web-menu-item > button {
+  display: flex; width: 100%; min-height: 28px; align-items: center;
+  justify-content: space-between; gap: 24px; padding: 5px 9px;
+  border: 0; background: none; color: #ddd; text-align: left; white-space: nowrap;
+  font-size: 12px;
+}
+.web-menu-item > button:hover { background: #3b3b3b; color: #fff; }
+.web-menu-item > button::after { content: ''; }
+.web-menu-item.has-submenu > button::after { content: '\203a'; color: var(--muted); font-size: 18px; line-height: 10px; }
+.web-menu-item.has-submenu > .web-menu-panel { top: -6px; left: 100%; }
+.web-menu-item.has-submenu:hover > .web-menu-panel { display: block; }
+.web-menu-separator { height: 1px; margin: 4px 5px; background: #3a3a3a; }
+html.web-version #dragstrip { top: 30px; }
+
 /* ========================= BOOKSHELF ========================= */
 
 #bookshelf-view {
