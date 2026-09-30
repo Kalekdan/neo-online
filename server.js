@@ -124,7 +124,7 @@ async function operation(op, args) {
     case 'spellSuggest': { if (!(await ensureSpellDictionary())) return []; const result = await spellRequest({ type: 'suggest', word: a }); return result.ok ? result.result : []; }
     case 'spellLearn': { if (typeof a === 'string' && await ensureSpellDictionary()) await spellRequest({ type: 'add', word: a }); return true; }
     case 'setSpellLanguage': { if (!SPELL_LANGUAGES[a]) return false; return loadSpellDictionary(a); }
-    case 'appVersion': return 'NEO online';
+    case 'appVersion': return 'NEO online v0.0.1';
     case 'checkForUpdate': return { error: true };
     case 'fullscreenEscape': case 'fullscreenToggle': return false;
     case 'logError': fs.appendFileSync(path.join(LIBRARY_DIR, 'neo-errors.log'), `[${new Date().toISOString()}] [browser] ${String(a)}\n`); return true;
