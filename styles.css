@@ -762,6 +762,11 @@ body.bright .spell-menu button { color: #eee; }
   margin: 1.6em 0; user-select: none;
 }
 .chapter-body p.scene-break + p { text-indent: 0; }
+/* …except a line of dialogue, there and at a story's opening: it keeps its
+   indent, in line with the speech that follows (marked in app.js). Pages
+   that aren't stories (no-cap) set their lines their own way. */
+.chapter-body.opens-dialogue:not(.no-cap) p:not(.poetry):not(p:not(.poetry) ~ p):not([style*="text-align"]),
+.chapter-body:not(.no-cap) p.scene-break + p[data-speech]:not([style*="text-align"]) { text-indent: 2em; }
 /* centered/right paragraphs drop the first-line indent; justified keep it */
 .chapter-body p[style*="text-align"]:not([style*="justify"]) { text-indent: 0; }
 /* Invisible anchors marking where a darling was cut from */

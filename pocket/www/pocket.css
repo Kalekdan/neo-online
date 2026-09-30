@@ -103,3 +103,8 @@ body.light .book { box-shadow: 2px 3px 6px rgba(0,0,0,0.2); }
    stays faintly there, and small (not a 40px tap target) */
 .nav-gap .ng-plus { opacity: 0.45; pointer-events: auto; min-height: 0; width: 26px; height: 26px; margin: -13px 0 0 -13px; line-height: 23px; }
 .nav-gap::before { display: none; }
+
+/* The Chapters pane is for hopping on Pocket: a chapter's note shows but
+   isn't written here (the Outline is where it's written), and an empty one
+   takes no room */
+.nav-note.nav-note-ro:empty { display: none; }

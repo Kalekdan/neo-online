@@ -209,6 +209,8 @@ const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 const IS_MAC = navigator.platform.toLowerCase().includes('mac');
 // a touch screen (Pocket): nothing to hover, no right button
 const NO_HOVER = !!(window.matchMedia && window.matchMedia('(hover: none)').matches) || !!window.Capacitor;
+// NEO Pocket (the Android and iOS shell)
+const IS_POCKET = !!window.Capacitor;
 
 // Touch has no right-click: a long press on a book, a shelf name or a chapter
 // heading opens the same menu. Not inside the text itself — there a long
@@ -2162,14 +2164,10 @@ async function openBook(bookId) {
     if (isNew) {
       $('#tp-title').focus();
     } else if (book.lastPosition && book.chapterOrder.includes(book.lastPosition.chapterId)) {
-      // pick up right where you left off
+      // pick up right where you left off — here, or on the other device
       currentChapterId = book.lastPosition.chapterId;
-      const scroll = book.lastPosition.scroll || 0;
-      requestAnimationFrame(() => {
-        $('#paper-scroll').scrollTop = scroll;
-        highlightNav();
-        updateCounters();
-      });
+      const pos = book.lastPosition;
+      requestAnimationFrame(() => resumePosition(pos));
     }
   }
 
@@ -2429,19 +2427,22 @@ function wireChapterBody(body, chId) {
     e.preventDefault();
     const html = e.clipboardData.getData('text/html');
     const text = e.clipboardData.getData('text/plain');
+    // hyphens set as dialogue dashes, the same as typing them
+    const edges = caretEdges(body);
     if (html) {
-      document.execCommand('insertHTML', false, cleanPasteHtml(html));
+      document.execCommand('insertHTML', false, cleanPasteHtml(html, { style: dashStyle(), ...edges }));
       reconcileMarks();
     } else if (text) {
       const parts = text.replace(/\r/g, '').split(/\n+/).filter((p) => p.trim());
       parts.forEach((p, i) => {
         if (i > 0) document.execCommand('insertParagraph');
+        const line = dialogueDashes(p.trim(), dashStyle(), { start: i > 0 || edges.start, end: i < parts.length - 1 || edges.end, spaced: i === 0 && edges.spaced });
         // plain text written in Markdown keeps its *italics* and **bold**
-        const styled = library && library.markdownOff ? null : markdownInline(p.trim());
+        const styled = library && library.markdownOff ? null : markdownInline(line);
         if (styled) {
           document.execCommand('insertHTML', false, styled);
           stripJunkSpans(body); // the engine wraps inserted HTML in style spans
-        } else document.execCommand('insertText', false, p.trim());
+        } else document.execCommand('insertText', false, line);
       });
     }
   });
@@ -2479,6 +2480,8 @@ function wireChapterBody(body, chId) {
     if (emptyChapterBackspace(e, body, chId)) return;
     if (chapterStartBackspace(e, body, chId)) return;
     if (guardMarkerDelete(e, body, chId)) return;
+    // "Espere -" then Enter: the dash goes in before the paragraph ends
+    if (e.key === 'Enter') dialogueDashKey(e, body);
     if (handleEnter(e, body, chId)) return;
     if (handleTabSpacing(e)) return;
     smartKeys(e, body);
@@ -3225,16 +3228,24 @@ function sceneBreakDelete(e, body, chId) {
 
 // Read a body's HTML for saving:
 function captureBody(body) {
-  // (a page marks the lines that say who said it, for the screen only)
-  return body.innerHTML.replace(/(<p\b[^>]*?) data-attr=""/g, '$1');
+  // (a page marks the lines that say who said it, and a chapter the speech
+  // after a scene break, for the screen only)
+  return body.innerHTML.replace(/<p\b[^>]*>/g, (tag) => tag.replace(/ data-(?:attr|speech)=""/g, ''));
 }
 
 // A chapter that opens on a line of dialogue sets no drop cap: the dash
-// itself would be the letter enlarged. The class lives on the body, never saved.
+// itself would be the letter enlarged. That line, and one that follows a
+// scene break, keep their indent where prose is set flush, so the speech
+// lines up with the lines that answer it. The marks are never saved.
 const OPENING_DASH = /^\s*[-‐‑‒–—―]/;
 function markDialogueOpening(body) {
   const first = body.querySelector('p:not(.poetry)'); // the drop cap skips poetry paragraphs
   body.classList.toggle('opens-dialogue', !!first && OPENING_DASH.test(first.textContent));
+  for (const p of body.querySelectorAll('p[data-speech]')) if (!p.matches('.scene-break + p')) p.removeAttribute('data-speech');
+  for (const p of body.querySelectorAll('p.scene-break + p')) {
+    const speech = OPENING_DASH.test(p.textContent);
+    if (p.hasAttribute('data-speech') !== speech) p.toggleAttribute('data-speech', speech);
+  }
 }
 
 function syncChapter(body, chId) {
@@ -3287,12 +3298,32 @@ document.addEventListener('selectionchange', () => {
   }
 });
 
+// Does the caret sit at the start or the end of its paragraph, or after a
+// space? What's pasted there opens or ends the paragraph only if so.
+function caretEdges(body) {
+  const sel = window.getSelection();
+  if (!sel.rangeCount) return { start: true, end: true };
+  const range = sel.getRangeAt(0);
+  const node = range.startContainer.nodeType === Node.TEXT_NODE ? range.startContainer.parentElement : range.startContainer;
+  const block = node && node.closest('p, div, li');
+  if (!block || !body.contains(block)) return { start: true, end: true };
+  const pre = document.createRange();
+  pre.selectNodeContents(block);
+  pre.setEnd(range.startContainer, range.startOffset);
+  const post = document.createRange();
+  post.selectNodeContents(block);
+  post.setStart(range.endContainer, range.endOffset);
+  const before = pre.toString();
+  return { start: !before.trim(), end: !post.toString().trim(), spaced: /\s$/.test(before) };
+}
+
 // Reduce pasted HTML to what a manuscript is made of: paragraphs, bold,
 // italic. Word, Apple Notes, Google Docs and browsers each dress a
 // paragraph differently — <p>, <div>, a line break inside a block, styled
 // spans — so every block boundary and <br> becomes a paragraph break, and
 // styling that only lives in a style attribute is read as bold/italic.
-function cleanPasteHtml(html) {
+// dashes: { style, ...caretEdges } sets dialogue dashes, for the manuscript.
+function cleanPasteHtml(html, dashes) {
   // parsed off to the side: nothing in a clipboard loads or runs
   const holder = new DOMParser().parseFromString(html, 'text/html').body;
   holder.querySelectorAll('script,style,meta,link,img,table,head,title').forEach((n) => n.remove());
@@ -3328,13 +3359,21 @@ function cleanPasteHtml(html) {
       if (text) paras[paras.length - 1].push({ text, b: r.b, i: r.i });
     });
   }
-  const out = paras.map((runs) => {
+  const filled = paras.map((runs) => runs.some((r) => r.mark === undefined && r.text.trim()));
+  const out = paras.map((runs, n) => {
     // whitespace collapses like HTML's, and each paragraph is trimmed
     runs = runs.map((r) => (r.mark !== undefined ? r : { ...r, text: r.text.replace(/\s+/g, ' ') }));
     const first = runs.find((r) => r.mark === undefined);
     if (first) first.text = first.text.replace(/^\s+/, '');
     const last = [...runs].reverse().find((r) => r.mark === undefined);
     if (last) last.text = last.text.replace(/\s+$/, '');
+    if (dashes) {
+      dashRuns(runs, dashes.style, {
+        start: n !== filled.indexOf(true) || dashes.start,
+        end: n !== filled.lastIndexOf(true) || dashes.end,
+        spaced: n === filled.indexOf(true) && dashes.spaced
+      });
+    }
     const inner = runs.map((r) => {
       if (r.mark !== undefined) {
         // placeholder marks travel with their text; reconcileMarks pairs
@@ -3472,10 +3511,56 @@ document.addEventListener('keydown', (e) => {
   document.execCommand('insertText', false, just.key);
 }, true);
 
+// Dialogue dashes as you type (see dialogueDashEdits): a hyphen turns once
+// the key after it shows what it is. The key then goes on as usual, so a
+// quote after the dash still opens or closes. The opening dash is the
+// manuscript's only: Notes and Outline keep their "- " lists.
+let dashJustSet = null; // the dash just set, for ⌘Z
+function dialogueDashKey(e, body) {
+  if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey || e.isComposing || e.keyCode === 229) return;
+  const key = e.key === 'Enter' ? '' : e.key;
+  if (key.length > 1) return;
+  const sel = window.getSelection();
+  if (!sel.rangeCount) return;
+  const range = sel.getRangeAt(0);
+  if (!range.collapsed) return;
+  const start = range.startContainer.nodeType === Node.TEXT_NODE ? range.startContainer.parentElement : range.startContainer;
+  let block = start && start.closest('p, div, li');
+  if (!block || !body.contains(block)) block = body;
+  const pre = document.createRange();
+  pre.setStart(block, 0);
+  pre.setEnd(range.startContainer, range.startOffset);
+  const before = pre.toString();
+  // the hyphen opening the paragraph, or the one just behind the caret
+  let from;
+  if (/^-\s*$/.test(before) && body.matches('.chapter-body')) from = 0;
+  else if (/\s-$/.test(before)) from = before.length - 2;
+  else return;
+  const edit = dialogueDashEdits(before.slice(from) + key, dashStyle(), { start: from === 0, end: !key })[0];
+  if (!edit) return;
+  const at = from + edit.at;
+  selectChars(block, at, at + edit.from.length);
+  document.execCommand('insertText', false, edit.to);
+  if (key) dashJustSet = { block, at, was: edit.from, to: edit.to, key };
+}
+// ⌘Z (Ctrl+Z) right after: the hyphen comes back as typed
+document.addEventListener('keydown', (e) => {
+  const just = dashJustSet;
+  dashJustSet = null;
+  if (!just || !(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey || e.code !== 'KeyZ' || !just.block.isConnected) return;
+  e.preventDefault();
+  e.stopPropagation();
+  selectChars(just.block, just.at, just.at + just.to.length);
+  document.execCommand('insertText', false, just.was);
+  const caret = just.at + just.was.length + just.key.length;
+  selectChars(just.block, caret, caret);
+}, true);
+
 function smartKeys(e, body) {
   // a field can reach smartKeys twice (its own handler and the page-wide
   // one below): the first pass wins
   if (e.defaultPrevented) return;
+  dialogueDashKey(e, body);
   if (e.metaKey || e.ctrlKey || e.altKey) return;
   if (e.isComposing || e.keyCode === 229) return;
 
@@ -3602,6 +3687,62 @@ function bookQuotes(el) {
   return q;
 }
 
+// A hyphen standing on its own is a dash the keyboard didn't have. At the
+// start of a paragraph it opens speech, spaced the way the language sets
+// dialogue (— Olá, —Hola; elsewhere as typed). After a space, with a space,
+// a closing quote, punctuation or the paragraph's end behind it, it becomes
+// the language's dash and the spaces stay as typed. Hyphens in words
+// (guarda-chuva), suspended ones (pré- e pós-), and those before a digit
+// (-5) or a suffix (-mente) stay hyphens.
+const DIALOGUE_DASHES = {
+  pt: { open: '—', space: ' ', mid: '—' },   // — Olá — diz ela.
+  ru: { open: '—', space: ' ', mid: '—' },
+  es: { open: '—', space: '', mid: '—' },    // —Hola —dijo él—.
+  en: { open: '—', mid: '–' }                // and every other language: word – word
+};
+const DASH_OPEN = /^-(?:(\s+)(?=[^\s-])|(?=[^\s\d-]))/u;
+// (a quote typed right after the hyphen closes whatever comes next)
+const DASH_MID = /(?<=\s)-(?=["'“”‘’«»„]*(?:[\s.,;:!?…)\]]|$)|["'“”‘’«»„]+\uE000)/gu;
+// The changes, as { at, from, to }. start / end: whether the text begins or
+// ends its paragraph (a fragment pasted mid-sentence does neither); spaced:
+// whether a space comes before it.
+function dialogueDashEdits(text, style, { start = true, end = true, spaced = false } = {}) {
+  // a scene break, or a paragraph of nothing but dashes
+  if (start && end && /^[\s*#•~⁂—–-]*$/.test(text)) return [];
+  const edits = [];
+  const open = start && text.match(DASH_OPEN);
+  if (open) edits.push({ at: 0, from: open[0], to: style.open + (style.space !== undefined ? style.space : open[1] || '') });
+  // past the end of a fragment, anything could follow
+  const lead = !start && spaced ? ' ' : '';
+  const probe = lead + text + (end ? '' : '\uE000');
+  for (const m of probe.matchAll(DASH_MID)) edits.push({ at: m.index - lead.length, from: '-', to: style.mid });
+  return edits;
+}
+function dialogueDashes(text, style, edges) {
+  return dialogueDashEdits(text, style, edges).reduceRight(
+    (s, e) => s.slice(0, e.at) + e.to + s.slice(e.at + e.from.length), text);
+}
+// The same across a pasted paragraph's runs of bold and italic: each change
+// lands in the run that holds it
+function dashRuns(runs, style, edges) {
+  const texts = runs.filter((r) => r.mark === undefined);
+  const edits = dialogueDashEdits(texts.map((r) => r.text).join(''), style, edges);
+  for (const e of edits.reverse()) {
+    let pos = 0;
+    for (const r of texts) {
+      if (e.at >= pos && e.at + e.from.length <= pos + r.text.length) {
+        r.text = r.text.slice(0, e.at - pos) + e.to + r.text.slice(e.at - pos + e.from.length);
+        break;
+      }
+      pos += r.text.length;
+    }
+  }
+}
+function dashStyle() {
+  const code = writingLanguage();
+  return DIALOGUE_DASHES[code] || DIALOGUE_DASHES[code.split('-')[0]] || DIALOGUE_DASHES.en;
+}
+
 // French typographic rules apply when the book is spellchecked in French,
 // or when NEO itself speaks French. Returns false, 'fr', or 'ca' for Quebec
 // usage (when the interface is set to Canadian French).
@@ -3675,9 +3816,12 @@ document.addEventListener('keydown', (e) => {
 // ⌥⌘↓ / ⌥⌘↑ (Ctrl+Alt on Windows and Linux): next or previous chapter.
 // No menu item carries these any more, so the window catches them itself —
 // first, before the page or the outline can read them as plain arrows.
+// Pocket takes both: a keyboard paired with a phone or an iPad may be a
+// Mac's (⌘ arrives as Meta) or a PC's (Ctrl).
 window.addEventListener('keydown', (e) => {
   if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
-  if (!(IS_MAC ? e.metaKey : e.ctrlKey) || !e.altKey || e.shiftKey) return;
+  const cmd = IS_POCKET ? (e.metaKey !== e.ctrlKey) : (IS_MAC ? e.metaKey : e.ctrlKey);
+  if (!cmd || !e.altKey || e.shiftKey) return;
   if ($('#editor-view').hidden || document.querySelector('.modal-backdrop:not([hidden])')) return;
   e.preventDefault();
   e.stopPropagation();
@@ -4272,7 +4416,14 @@ function renderNav() {
       chapterMenu(chId, e.clientX, e.clientY, rowEl);
     });
 
-    if (story) {
+    if (story && IS_POCKET) {
+      // on a phone this pane is for hopping: a tap anywhere on the box
+      // goes there. The note is read here and written in the Outline.
+      const note = document.createElement('div');
+      note.className = 'nav-note nav-note-ro';
+      note.textContent = book.chapterNotes[chId] || '';
+      item.appendChild(note);
+    } else if (story) {
       // outline your whole book from this panel:
       const note = document.createElement('div');
       note.className = 'nav-note';
@@ -4303,6 +4454,14 @@ function renderNav() {
 
     item.onclick = () => {
       switchTab('manuscript');
+      if (IS_POCKET) {
+        // the top of the chapter, and the pane steps aside for the page
+        const sec = document.querySelector(`.chapter[data-id="${chId}"]`);
+        focusChapterStart(chId);
+        if (sec) sec.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
+        if ($('#nav-pane').dataset.pinned !== '1') $('#nav-pane').classList.remove('open');
+        return;
+      }
       focusChapter(chId);
     };
     // from the keyboard, the row is the chapter's button (F6 reaches the pane)
@@ -5538,13 +5697,25 @@ async function saveMeta() {
   savedMetaSig = sig;
 }
 
-function flushAllSaves() {
+function flushAllSaves(e) {
   if (!book) return;
-  // remember where you were for next session
-  const pos = { chapterId: currentChapterId, scroll: $('#paper-scroll').scrollTop };
-  const moved = !book.lastPosition || book.lastPosition.chapterId !== pos.chapterId ||
-    Math.abs((book.lastPosition.scroll || 0) - pos.scroll) > 40;
-  book.lastPosition = pos;
+  // remember where you were, for next session and for the other device:
+  // the chapter, the paragraph and the letter (the same place on any
+  // screen) plus the scroll (this screen's). `at` changes only when the
+  // caret does, so a device that merely scrolled never calls the other
+  // one back to an old spot.
+  const prev = book.lastPosition || {};
+  const caret = captureCaret();
+  const spot = caret
+    ? { chapterId: caret.chId, pIdx: caret.pIdx, off: caret.off }
+    : prev.chapterId === currentChapterId ? { chapterId: prev.chapterId, pIdx: prev.pIdx, off: prev.off } : { chapterId: currentChapterId };
+  const scroll = $('#paper-scroll').scrollTop;
+  const newSpot = spot.chapterId !== prev.chapterId || spot.pIdx !== prev.pIdx;
+  const newLetter = newSpot || spot.off !== prev.off;
+  // the regular tick while writing saves a new paragraph; leaving NEO (a
+  // blur, the app going to the background, closing) saves the exact letter
+  const moved = newSpot || (e !== 'tick' && newLetter) || Math.abs((prev.scroll || 0) - scroll) > 40;
+  if (moved) book.lastPosition = { ...spot, scroll, at: newLetter ? Date.now() : (prev.at || Date.now()) };
   for (const chId of book.chapterOrder) {
     if (chapterHTML[chId] !== undefined && chapterHTML[chId] !== savedHTML[chId]) {
       persistChapter(chId);
@@ -5757,6 +5928,21 @@ async function refreshFromDisk() {
       else if (replaced.length) toast(t('Updated from your other device — the text it replaced is in Darlings'), 8000);
       else toast(t('Updated from your other device'));
     }
+
+    // The writer moved on to the other device since last touching this one:
+    // the caret goes where they left off there. (Its chapter's words may
+    // still be crossing over; the spot waits a little for its paragraph.)
+    const there = meta.lastPosition;
+    const here = book.lastPosition || {};
+    if (there && typeof there.at === 'number' && there.at > (here.at || 0) && there.at > lastHereActivity &&
+        currentTab === 'manuscript' && !document.querySelector('.modal-backdrop:not([hidden])') &&
+        book.chapterOrder.includes(there.chapterId)) {
+      const body = document.querySelector(`.chapter[data-id="${there.chapterId}"] .chapter-body`);
+      const arrived = body && (typeof there.pIdx !== 'number' || body.querySelectorAll('p').length > there.pIdx);
+      if ((arrived || Date.now() - there.at > 120000) && resumePosition(there)) {
+        book.lastPosition = { ...there, scroll: $('#paper-scroll').scrollTop };
+      }
+    }
   } catch (err) {
     console.error(err);
   } finally {
@@ -5775,7 +5961,7 @@ document.addEventListener('visibilitychange', () => {
 window.addEventListener('beforeunload', flushAllSaves);
 // flush whenever focus leaves NEO, and every 20 seconds
 window.addEventListener('blur', () => { if (book) flushAllSaves(); });
-setInterval(() => { if (book) flushAllSaves(); }, 20000);
+setInterval(() => { if (book) flushAllSaves('tick'); }, 20000);
 
 async function backToShelf() {
   flushAllSaves();
@@ -5862,6 +6048,44 @@ function restoreCaret(caret) {
   sel.addRange(r);
   finish();
 }
+
+// Back where the writer left off, on this device or the other one: the caret
+// at its letter, a third of the way down the window. A position from an
+// older NEO (the scroll alone) gets the scroll.
+function resumePosition(pos) {
+  if (!book || !pos || !book.chapterOrder.includes(pos.chapterId)) return false;
+  const body = document.querySelector(`.chapter[data-id="${pos.chapterId}"] .chapter-body`);
+  if (!body) return false;
+  const sc = $('#paper-scroll');
+  if (typeof pos.pIdx !== 'number' || !body.isContentEditable) {
+    currentChapterId = pos.chapterId;
+    sc.scrollTop = pos.scroll || 0;
+  } else {
+    restoreCaret({ chId: pos.chapterId, pIdx: pos.pIdx, off: pos.off || 0 });
+    const sel = window.getSelection();
+    if (sel.rangeCount) {
+      const r = sel.getRangeAt(0).cloneRange();
+      let rect = r.getBoundingClientRect();
+      if (!rect.height) {
+        const node = r.startContainer.nodeType === Node.ELEMENT_NODE ? r.startContainer : r.startContainer.parentElement;
+        if (node) rect = node.getBoundingClientRect();
+      }
+      sc.scrollTop += rect.top - sc.getBoundingClientRect().top - sc.clientHeight / 3;
+    }
+  }
+  highlightNav();
+  updateCounters();
+  return true;
+}
+
+// When this device last did something to the page: a key, or a tap or click
+// in the manuscript. A newer spot from the other device moves the caret only
+// if it is newer than that (a scroll or a glance doesn't count).
+let lastHereActivity = 0;
+document.addEventListener('keydown', () => { lastHereActivity = Date.now(); }, true);
+document.addEventListener('pointerdown', (e) => {
+  if (e.target && e.target.closest && e.target.closest('#chapters')) lastHereActivity = Date.now();
+}, true);
 
 // The engine's undo history must never replay against a document NEO has
 // rearranged by hand — clear it whenever such a rearrangement happens.
@@ -6191,7 +6415,8 @@ async function addImportedBooks(results, shelf) {
       const chId = 'ch-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
       const html = ch.paras.map((p) => {
         if (p.scene) return '<p class="scene-break">***</p>';
-        let text = escHtml(p.text || '');
+        // hyphens set as dialogue dashes, the same as typing them
+        let text = escHtml(dialogueDashes(p.text || '', dashStyle()));
         text = text.replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
                    .replace(/\*([^*]+)\*/g, '<i>$1</i>')
                    .replace(/_([^_]+)_/g, '<i>$1</i>');
@@ -6253,6 +6478,10 @@ async function spellScanEl(el, key) {
   const re = /[\p{L}\p{M}'’]+(?:-[\p{L}\p{M}'’]+)*/gu;
   const piece = /[\p{L}\p{M}'’]+/gu;
   const legal = (raw) => /^[\p{Lu}'’]+$/u.test(raw); // acronyms and shouting are legal
+  // a stammer (E-eu, N-não, Wh-what): each short piece starts the next, and
+  // only the word it lands on is judged
+  const bare = (s) => s.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
+  const stammers = (bits) => bits.length > 1 && bits.slice(0, -1).every((s, i) => s.length <= 3 && bare(bits[i + 1]).startsWith(bare(s)));
   let n;
   while ((n = walker.nextNode())) {
     const p = n.parentElement;
@@ -6260,16 +6489,18 @@ async function spellScanEl(el, key) {
     let m;
     re.lastIndex = 0;
     while ((m = re.exec(n.data))) {
+      const stammer = stammers(m[0].split('-'));
       const parts = [];
       piece.lastIndex = 0;
       let q;
       while ((q = piece.exec(m[0]))) {
         const word = spellNorm(q[0]);
         if (word.length < 2 || legal(q[0])) continue;
+        if (stammer && q.index + q[0].length < m[0].length) continue;
         parts.push({ start: m.index + q.index, end: m.index + q.index + q[0].length, word });
       }
       if (!parts.length) continue;
-      const whole = m[0].includes('-') && !legal(m[0].replace(/-/g, '')) ? spellNorm(m[0]) : null;
+      const whole = m[0].includes('-') && !stammer && !legal(m[0].replace(/-/g, '')) ? spellNorm(m[0]) : null;
       occurrences.push({ node: n, start: m.index, end: m.index + m[0].length, whole, parts });
     }
   }
@@ -6381,8 +6612,18 @@ document.addEventListener('contextmenu', async (e) => {
   while (a > 0 && isW(text[a - 1])) a--;
   while (b < text.length && isW(text[b])) b++;
   if (a === b) return;
-  const word = spellNorm(text.slice(a, b));
-  if (spellCache.get(word) !== false) return; // only flagged words get our menu
+  let word = spellNorm(text.slice(a, b));
+  if (spellCache.get(word) !== false) {
+    // …or a hyphenated word underlined whole: every piece is a word, the
+    // whole isn't (see spellScanEl)
+    let wa = a, wb = b;
+    while (text[wa - 1] === '-' && isW(text[wa - 2] || '')) { wa--; while (wa > 0 && isW(text[wa - 1])) wa--; }
+    while (text[wb] === '-' && isW(text[wb + 1] || '')) { wb++; while (wb < text.length && isW(text[wb])) wb++; }
+    const whole = spellNorm(text.slice(wa, wb));
+    if (whole === word || spellCache.get(whole) !== false) return; // only flagged words get our menu
+    if (text.slice(wa, wb).split('-').some((w) => spellCache.get(spellNorm(w)) === false)) return;
+    a = wa; b = wb; word = whole;
+  }
   e.preventDefault();
   const chEl = editor.closest ? editor.closest('.chapter') : null;
   const key = editor.id === 'aux-editor'
@@ -7414,8 +7655,13 @@ function buildMd(data) {
 // inside the file, so the PDF matches the page on any machine; a font the
 // computer has goes by name, with the same fallbacks as the page.
 const exportBodyFont = () => (getComputedStyle(document.documentElement).getPropertyValue('--body-font').trim() || 'Georgia, serif').replace(/[<>{};]/g, '');
+// the drop cap too: its face is the page's, bundled or the computer's
+const exportDropCapFont = () => (getComputedStyle(document.documentElement).getPropertyValue('--dropcap-font').trim() || 'Georgia, serif').replace(/[<>{};]/g, '');
+const firstFamily = (stack) => stack.split(',')[0].trim().replace(/^["']|["']$/g, '');
 async function exportFontFaces(d) {
-  const family = exportBodyFont().split(',')[0].trim().replace(/^["']|["']$/g, '');
+  const family = firstFamily(exportBodyFont());
+  // the drop cap sets one letter, upright and regular
+  const cap = (library.fonts || {}).dropcap === 'none' ? '' : firstFamily(exportDropCapFont());
   const text = d.sections.map((ch) => ch.paras.map((p) => p.html).join('')).join('');
   // (the title is always bold; a dedication, an epigraph, a part's lines
   // and a title's subtitle are set in italic)
@@ -7428,18 +7674,24 @@ async function exportFontFaces(d) {
     try { rules = [...sheet.cssRules]; } catch { continue; }
     for (const r of rules) {
       if (!(r instanceof CSSFontFaceRule)) continue;
-      if (r.style.getPropertyValue('font-family').replace(/["']/g, '').trim() !== family) continue;
+      const name = r.style.getPropertyValue('font-family').replace(/["']/g, '').trim();
       const style = r.style.getPropertyValue('font-style') || 'normal';
       const weight = r.style.getPropertyValue('font-weight') || '400';
-      if (style === 'italic' && !(parseInt(weight, 10) >= 600 ? boldItalic : italic)) continue;
+      const forBody = name === family && !(style === 'italic' && !(parseInt(weight, 10) >= 600 ? boldItalic : italic));
+      const forCap = name === cap && style === 'normal' && parseInt(weight, 10) === 400;
+      if (!forBody && !forCap) continue;
       const src = r.style.getPropertyValue('src').match(/url\(["']?([^"')]+)["']?\)\s*(format\([^)]*\))?/);
       if (!src) continue;
+      // a Russian face keeps its range and its measures, or it would stand
+      // in for the Latin one at the Latin one's size
+      const fit = ['unicode-range', 'size-adjust', 'ascent-override', 'descent-override', 'line-gap-override']
+        .map((k) => r.style.getPropertyValue(k) && ` ${k}: ${r.style.getPropertyValue(k)};`).filter(Boolean).join('');
       try {
         const bytes = new Uint8Array(await (await fetch(new URL(src[1], sheet.href || location.href))).arrayBuffer());
         let bin = '';
         for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
         const ext = src[1].split('.').pop().toLowerCase();
-        css += `@font-face { font-family: '${family}'; src: url(data:font/${ext};base64,${btoa(bin)}) ${src[2] || ''}; font-weight: ${weight}; font-style: ${style}; }\n`;
+        css += `@font-face { font-family: '${name}'; src: url(data:font/${ext};base64,${btoa(bin)}) ${src[2] || ''}; font-weight: ${weight}; font-style: ${style};${fit} }\n`;
       } catch { /* the name still stands, with its fallbacks */ }
     }
   }
@@ -7462,20 +7714,22 @@ function buildHtml(data, opts = {}) {
   // scene breaks resume ordinary body text
   const prose = (paras, initial) => {
     let first = initial;
+    let afterBreak = false; // a story's line of speech after *** keeps its indent
     return paras.map((p) => {
-      if (p.sceneBreak) return '<p class="brk">***</p>';
-      if (p.poetry) return p.html;
+      if (p.sceneBreak) { afterBreak = initial; return '<p class="brk">***</p>'; }
+      if (p.poetry) { afterBreak = false; return p.html; }
       let html = p.html;
-      if (first) {
+      if (first || afterBreak) {
         const h = document.createElement('div');
         h.innerHTML = html;
         if (h.firstElementChild) {
-          h.firstElementChild.classList.add('first');
+          if (first) h.firstElementChild.classList.add('first');
           if (OPENING_DASH.test(h.textContent)) h.firstElementChild.classList.add('dialogue');
           html = h.innerHTML;
         }
       }
       first = false;
+      afterBreak = false;
       return html;
     }).join('\n');
   };
@@ -7553,9 +7807,14 @@ function buildHtml(data, opts = {}) {
   .chapter .hd, .contents .hd { text-align: center; letter-spacing: 4px; font-variant-caps: all-small-caps; font-variant-numeric: oldstyle-nums; font-size: 17pt; font-weight: normal; color: #555; margin: 54px 0 36px; }
   .chapter p { text-indent: 2em; margin: 0; }
   .chapter .hd + p, .chapter .byline + p, .brk + p, .chapter p.first { text-indent: 0; }
-  /* an in-flow raised initial: stays inside its word for copy, search,
-     and screen readers, unlike a floated drop cap */
-  ${(library.fonts || {}).dropcap === 'none' ? '' : '.chapter p.first:not(.dialogue)::first-letter { font-size: 1.8em; line-height: 1; }'}
+  .chapter p.dialogue { text-indent: 2em; }
+  /* the drop cap the page sets, two lines deep in its own face. An initial
+     letter, not a float: it stays inside its word, so the PDF's copy,
+     search, and screen readers still find "The" where a float leaves "T"
+     and "he" (a gap much wider than 4px splits the word again). A browser
+     that can't set one gets a raised initial. */
+  ${(library.fonts || {}).dropcap === 'none' ? '' : `.chapter p.first:not(.dialogue)::first-letter { -webkit-initial-letter: 2; initial-letter: 2; padding-right: 4px; font-family: ${exportDropCapFont()}; }
+  @supports not ((initial-letter: 2) or (-webkit-initial-letter: 2)) { .chapter p.first:not(.dialogue)::first-letter { font-size: 1.8em; line-height: 1; padding-right: 0; } }`}
   .brk { text-align: center; text-indent: 0 !important; letter-spacing: 8px; color: #888; margin: 2.5em 0; }
   .chapter p.poetry { text-indent: 0; margin: 0 2.5em; }
   .chapter p:not(.poetry) + p.poetry, .chapter .hd + p.poetry { margin-top: 0.9em; }
@@ -7828,7 +8087,11 @@ ${ch.subtitle ? `<p class="sub">${escXml(ch.subtitle)}</p>` : ''}${ch.byline ? `
       if (p.sceneBreak) { first = true; return '<p class="brk">* * *</p>'; }
       const classes = [];
       if (p.poetry) classes.push('poetry');
-      else if (first) classes.push('first');
+      else if (first) {
+        classes.push('first');
+        // speech keeps its indent, in line with the lines that answer it
+        if (OPENING_DASH.test(p.text || '')) classes.push('dialogue');
+      }
       if (p.align === 'center' || p.align === 'right') classes.push(p.align);
       const cls = classes.length ? ` class="${classes.join(' ')}"` : '';
       if (!p.poetry) first = false;
@@ -7941,6 +8204,7 @@ ${navList(toc)}
 h1 { text-align: center; font-weight: normal; letter-spacing: 0.2em; text-transform: uppercase; font-size: 1.2em; margin: 3em 0 2em; }
 p { text-indent: 1.2em; margin: 0; }
 p.first, p.brk + p, p.byline + p { text-indent: 0; }
+p.first.dialogue:not(.center):not(.right) { text-indent: 1.2em; }
 p.center { text-align: center; text-indent: 0; }
 p.right { text-align: right; text-indent: 0; }
 p.brk { text-align: center; text-indent: 0; margin: 2.5em 0; letter-spacing: 0.5em; }

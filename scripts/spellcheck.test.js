@@ -281,3 +281,48 @@ test('hyphenated words: the whole word first, then only the wrong pieces', async
   await vm.runInContext('spellOn = true; spellScanEl(el, "ch-test")', context);
   assert.deepEqual([...highlights.get('neo-spell')].map((r) => r.toString()), ['knwon']);
 });
+
+test('a hyphenated word underlined whole opens the menu; a stammer is no misspelling', async () => {
+  const send = spellWorker();
+  assert.equal((await send({ type: 'load', language: 'pt-BR', dir: path.join(root, 'node_modules/dictionary-pt') })).ok, true);
+  const node = { data: '— E-eu não sei. N-não. Ch-chega! Ela tinha auto-estima, sim.', nodeType: 3, isConnected: true };
+  const editor = { node, id: '', dataset: {}, closest: (selector) => selector === '.chapter' ? { dataset: { id: 'ch-test' } } : editor };
+  class TextRange {
+    setStart(n, offset) { this.node = n; this.start = offset; }
+    setEnd(_n, offset) { this.end = offset; }
+    toString() { return this.node.data.slice(this.start, this.end); }
+  }
+  let contextmenu, menu, selected;
+  const highlights = new Map();
+  const context = vm.createContext({
+    document: {
+      addEventListener: (name, callback) => { if (name === 'contextmenu') contextmenu = callback; },
+      createTreeWalker: () => { let n = node; return { nextNode: () => { const x = n; n = null; return x; } }; },
+      querySelector: () => editor,
+      createRange: () => new TextRange(),
+      // right-click inside "auto", the first piece of the underlined word
+      caretRangeFromPoint: () => ({ startContainer: node, startOffset: node.data.indexOf('auto') + 2 }),
+      execCommand: (_cmd, _ui, text) => { node.data = node.data.slice(0, selected.start) + text + node.data.slice(selected.end); }
+    },
+    Node: { TEXT_NODE: 3 }, NodeFilter: { SHOW_TEXT: 4 }, Range: TextRange, Highlight: Set, CSS: { highlights },
+    $: () => null, t: (text) => text, toast() {},
+    captureMenu: (_x, _y, word, suggestions, actions) => { menu = { word, suggestions, actions }; },
+    window: {
+      getSelection: () => ({ removeAllRanges() {}, addRange: (r) => { selected = r; } }),
+      neo: {
+        spellCheckWords: async (words) => (await send({ type: 'check', words })).result,
+        spellSuggest: async (word) => (await send({ type: 'suggest', word })).result
+      }
+    }
+  });
+  const app = source('app.js');
+  vm.runInContext(app.slice(app.indexOf('let spellOn = false;'), app.indexOf('let typewriterEnabled = false;')), context);
+  context.el = editor;
+  await vm.runInContext('spellOn = true; showSpellMenu = captureMenu; spellScanEl(el, "ch-test")', context);
+  assert.deepEqual([...highlights.get('neo-spell')].map((r) => r.toString()), ['auto-estima']);
+  await contextmenu({ target: editor, clientX: 0, clientY: 0, preventDefault() {} });
+  assert.equal(menu && menu.word, 'auto-estima');
+  assert.ok(menu.suggestions.includes('autoestima'));
+  menu.actions.replace('autoestima');
+  assert.equal(node.data, '— E-eu não sei. N-não. Ch-chega! Ela tinha autoestima, sim.');
+});
