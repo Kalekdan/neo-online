@@ -9,6 +9,36 @@ if (!window.neo) {
     const upload = (file, bookId) => asBase64(file).then((content) => call('writeUploadedCover', bookId, file.name, content));
     const importFiles = (files) => Promise.all(files.map((file) => asBase64(file).then((content) => ({ name: file.name, content })))).then((files) => call('importFiles', files));
     const download = (name, content, base64) => { const link = document.createElement('a'); link.href = URL.createObjectURL(new Blob([base64 ? Uint8Array.from(atob(content), (c) => c.charCodeAt(0)) : content], { type: 'application/octet-stream' })); link.download = name; link.click(); setTimeout(() => URL.revokeObjectURL(link.href), 1000); return name; };
+    let menuHandler = null;
+    document.addEventListener('keydown', (e) => {
+      if (!menuHandler || e.isComposing || !(e.metaKey || e.ctrlKey) || e.altKey) return;
+      const key = e.key.toLowerCase();
+      let message = null;
+      if (!e.shiftKey && key === 'e') message = { type: 'emailDraft' };
+      else if (!e.shiftKey && key === ',') message = { type: 'stats' };
+      else if (e.shiftKey && key === 'i') message = { type: 'import' };
+      else if (!e.shiftKey && key === 'f') message = { type: 'find' };
+      else if (!e.shiftKey && key === '/') message = { type: 'help' };
+      else if (e.shiftKey && key === 'f') {
+        e.preventDefault();
+        e.stopPropagation();
+        window.neo.fullscreenToggle().catch((error) => window.neo.logError(`fullscreen: ${error.message}`));
+        return;
+      }
+      else if (e.shiftKey && key === 'o') message = { type: 'focusCycle' };
+      else if (e.shiftKey && key === 't') message = { type: 'typewriter' };
+      else if (e.shiftKey && key === 'l') message = { type: 'align', value: 'left' };
+      else if (e.shiftKey && key === 'c') message = { type: 'align', value: 'center' };
+      else if (e.shiftKey && key === 'r') message = { type: 'align', value: 'right' };
+      else if (e.shiftKey && key === 'j') message = { type: 'align', value: 'justify' };
+      else if (e.code === 'Equal') message = { type: 'fontSize', value: 1 };
+      else if (!e.shiftKey && (key === '-' || e.code === 'Minus')) message = { type: 'fontSize', value: -1 };
+      else if (!e.shiftKey && key === '0') message = { type: 'fontSize', value: 0 };
+      if (!message) return;
+      e.preventDefault();
+      e.stopPropagation();
+      menuHandler(message);
+    }, true);
     window.neo = {
       i18n: locale,
       readLibrary: () => call('readLibrary'), writeLibrary: (x) => call('writeLibrary', x), libraryPath: () => call('libraryPath'), createBook: (x) => call('createBook', x), listBooks: () => call('listBooks'), readBookMeta: (x) => call('readBookMeta', x), writeBookMeta: (x, y) => call('writeBookMeta', y), deleteBook: (x) => call('deleteBook', x),
@@ -17,8 +47,8 @@ if (!window.neo) {
       hasSecret: () => false, setSecret: () => false, paintCover: () => Promise.reject(new Error('Cover painting is not configured for the browser bridge')),
       exportSave: async ({ format, defaultName, content, zipEntries }) => { if (format === 'pdf') return null; if (zipEntries) return download(`${defaultName}.${format}`, await call('exportZip', zipEntries), true); return download(`${defaultName}.${format}`, content, false); },
       emailDraft: ({ to, subject, body }) => { location.href = `mailto:${encodeURIComponent(to || '')}?subject=${encodeURIComponent(subject || '')}&body=${encodeURIComponent(body || '')}`; return { ok: true, method: 'mailto' }; }, importPick: () => chooseFile('.txt,.md').then((file) => file ? importFiles([file]) : []), importFiles, pathForFile: () => null,
-      fullscreenEscape: () => document.fullscreenElement ? document.exitFullscreen().then(() => true) : false, fullscreenToggle: () => document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen(), checkForUpdate: () => call('checkForUpdate'), installUpdate: () => false, appVersion: () => call('appVersion'), openRelease: () => true,
-      spellCheckWords: (x) => call('spellCheckWords', x), spellSuggest: (x) => call('spellSuggest', x), spellLearn: (x) => call('spellLearn', x), setSpellLanguage: (x) => call('setSpellLanguage', x), logError: (x) => call('logError', x), onMenu: () => {}, reloadForLanguage: () => location.reload(), poetryState: () => {}, typewriterState: () => {}, vimState: () => {}, uiZoomState: () => {}, writingStyleState: () => {}, viewState: () => {}
+      fullscreenEscape: () => document.fullscreenElement ? document.exitFullscreen().then(() => true) : Promise.resolve(false), fullscreenToggle: () => document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen(), checkForUpdate: () => call('checkForUpdate'), installUpdate: () => false, appVersion: () => call('appVersion'), openRelease: () => true,
+      spellCheckWords: (x) => call('spellCheckWords', x), spellSuggest: (x) => call('spellSuggest', x), spellLearn: (x) => call('spellLearn', x), setSpellLanguage: (x) => call('setSpellLanguage', x), logError: (x) => call('logError', x), onMenu: (callback) => { menuHandler = callback; }, reloadForLanguage: () => location.reload(), poetryState: () => {}, typewriterState: () => {}, vimState: () => {}, uiZoomState: () => {}, writingStyleState: () => {}, viewState: () => {}
     };
   })();
 }
