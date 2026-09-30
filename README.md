@@ -1,6 +1,8 @@
-# NEO-online
+# NEO online
 
 **A maintained, self-hosted browser fork of NEO for authors.**
+
+> All credit for the NEO goes to the original creator, Hugh Howey. This is simply a fork for my usecase which I hope some others may get some value from.
 
 NEO-online is based on [NEO](https://github.com/hughhowey/neo), a distraction-free word processor for authors. It keeps NEO's renderer and writing experience, while replacing Electron's local filesystem boundary with a Node.js HTTP server so NEO can run in a browser.
 
