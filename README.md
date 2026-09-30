@@ -1,25 +1,65 @@
-# NEO
+# NEO-online
 
-**A distraction-free word processor for authors, by a wannabe author.**
+**A maintained, self-hosted browser fork of NEO for authors.**
 
-NEO understands from the moment you install it that you are writing *books* and nothing else. No bloat, no distractions, with manuscripts that look like books as you write them.
+NEO-online is based on [NEO](https://github.com/hughhowey/neo), a distraction-free word processor for authors. It keeps NEO's renderer and writing experience, while replacing Electron's local filesystem boundary with a Node.js HTTP server so NEO can run in a browser.
 
-NEO runs locally. WIPs are saved in plain files on your disk. No accounts or subscriptions. And it's free!
+This repository is a maintained fork. Upstream NEO changes are merged regularly, and browser-specific differences are kept as small and explicit as possible.
 
-## Download
+## Run the browser version
 
-Get the latest installer from the **[Releases page](../../releases)**:
+Requires [Node.js](https://nodejs.org).
 
-- **macOS** — download the `.dmg` for older Intel machines or the arm64 file for Mac silicon. Open it and drag NEO to Applications.
-- **Windows** — download the `.exe` and run it. Or get the setup installer and run that.
-- **Linux** — download the `.AppImage`, make it executable, and run it:
+```sh
+git clone https://github.com/Kalekdan/neo-online.git
+cd neo-online
+npm install
+npm run start:web
+```
 
-  ```
-  chmod +x NEO-*.AppImage
-  ./NEO-*.AppImage
-  ```
+Open `http://localhost:3000`. The server listens on `0.0.0.0` and stores the
+library in `NEO Library` by default. Set `NEO_LIBRARY_DIR` to use another
+location.
 
-  If it complains about a sandbox (common on Ubuntu 24.04 and newer), run it as `./NEO-*.AppImage --no-sandbox`. Your library lives in `~/Documents/NEO Library`; File → Library Folder… moves it anywhere you like.
+Docker is also supported:
+
+```sh
+docker build -t neo-online .
+docker run --rm -p 3000:3000 -v neo-library:/data neo-online
+```
+
+The Docker files build the browser server only; they do not package the
+Electron desktop application.
+
+## Upstream NEO
+
+NEO-online preserves the existing Electron implementation and shared renderer
+for compatibility with upstream NEO. The desktop app can still be run from
+source with `npm start`, and its installers can be built with the existing
+Electron Builder commands.
+
+Changes to `app.js`, `preload.js`, `main.js`, library file formats, menus,
+shortcuts, spellcheck, or dependencies may require corresponding updates to
+`web-bridge.js` and `server.js`. Keep the browser boundary in mind when
+bringing changes across from upstream.
+
+## Browser differences
+
+The browser version uses the same renderer and `window.neo` contract as the
+Electron app. The server owns filesystem access and validates all library
+paths. Browser imports currently support `.txt` and `.md`; browser downloads
+support text, HTML, DOCX, and EPUB exports. PDF printing, encrypted desktop
+secrets, AI cover painting, native window controls, and desktop auto-updates
+remain Electron-only. The browser deployment also has no authentication, so
+it should only be exposed to trusted users or behind an appropriate proxy.
+
+## Maintaining the fork
+
+When upstream changes `app.js`, `preload.js`, `main.js`, menus, shortcuts,
+library file formats, spellcheck, or dependencies, review `web-bridge.js`,
+`server.js`, `spell-worker.js`, and the browser menu for corresponding changes.
+Run the syntax checks and `node --test scripts/*.test.js` before merging an
+upstream update.
 
 ## Why NEO?
 
@@ -81,29 +121,16 @@ Everything lives in `~/Documents/NEO Library` — one folder per book, chapters 
 
 NEO speaks English, French, Spanish, Portuguese, German, Italian, Dutch, Polish, Romanian and Russian. Pick one under **View → Language**; on first launch NEO follows your system language when it has it. Adding a language is a single file, no programming needed: see [TRANSLATING.md](TRANSLATING.md).
 
-## Building from source (for the eggheads):
+## Running the Electron compatibility build
 
 Requires [Node.js](https://nodejs.org).
 
 ```
-git clone https://github.com/hughhowey/neo.git
-cd neo
+git clone https://github.com/Kalekdan/neo-online.git
+cd neo-online
 npm install
 npm start
 ```
-
-### Self-hosted browser version
-
-The browser version keeps the same renderer and `window.neo` contract as the
-Electron app. Run `npm install`, then `npm run start:web` and open
-`http://localhost:3000`. It stores plain library files in `NEO Library` next
-to the application; set `NEO_LIBRARY_DIR` to change that location. Docker
-users can build the included `Dockerfile` and mount `/data` for persistence.
-
-The Electron-to-web replacements and deployment notes are recorded in
-[ONLINE.MD](ONLINE.MD). The ongoing list of web differences and the checklist
-for keeping neo-online aligned with NEO changes are in
-[NEO-ONLINE-DIFFERENCES.MD](NEO-ONLINE-DIFFERENCES.MD).
 
 **View → Keyboard Shortcuts…** opens the shortcut reference. You can also press `Cmd+/` on macOS or `Ctrl+/` on Windows and Linux, or use **Help → NEO Shortcuts**.
 
