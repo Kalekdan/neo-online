@@ -26,3 +26,6 @@ pocket/www/locales/
 
 # working files beside the repo, never part of it
 Claude outputs/
+
+# local library (if not configured)
+/NEO Library/*
