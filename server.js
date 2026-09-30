@@ -22,6 +22,28 @@ let spellWorker = null;
 let spellSequence = 0;
 const spellWaiting = new Map();
 let spellLanguage = null;
+const BOOK_LOCK_TTL = 45000;
+const bookLocks = new Map();
+function lockBook(bookId, clientId) {
+  if (typeof clientId !== 'string' || !clientId) return { locked: false };
+  const now = Date.now();
+  const current = bookLocks.get(bookId);
+  if (current && current.expires > now && current.clientId !== clientId) return { locked: true };
+  bookLocks.set(bookId, { clientId, expires: now + BOOK_LOCK_TTL });
+  return { locked: false, leaseMs: BOOK_LOCK_TTL };
+}
+function releaseBook(bookId, clientId) {
+  const current = bookLocks.get(bookId);
+  if (current && current.clientId === clientId) bookLocks.delete(bookId);
+  return true;
+}
+function touchBookLock(bookId, clientId) {
+  const current = bookLocks.get(bookId);
+  if (!current || current.expires <= Date.now()) { bookLocks.delete(bookId); return true; }
+  if (current.clientId !== clientId) throw new Error('Book is open in another browser instance');
+  current.expires = Date.now() + BOOK_LOCK_TTL;
+  return true;
+}
 function startSpellWorker() {
   if (spellWorker) return;
   spellWorker = new Worker(path.join(ROOT, 'spell-worker.js'));
@@ -90,10 +112,13 @@ function cover(bookId, filename) {
   try { const ext = path.extname(filename).slice(1); return { base64: fs.readFileSync(bookPath(bookId, filename)).toString('base64'), mime: ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg', ext }; } catch { return null; }
 }
 
-async function operation(op, args) {
+async function operation(op, args, clientId) {
   ensureLibrary();
   const [a, b, c] = args || [];
   switch (op) {
+    case 'lockBook': return lockBook(a, clientId);
+    case 'releaseBook': return releaseBook(a, clientId);
+    case 'touchBookLock': return touchBookLock(a, clientId);
     case 'readLibrary': return readJSON(LIBRARY_FILE, DEFAULT_LIBRARY());
     case 'writeLibrary': writeJSON(LIBRARY_FILE, a); catalog(); return true;
     case 'libraryPath': return LIBRARY_DIR;
@@ -104,20 +129,20 @@ async function operation(op, args) {
       writeJSON(path.join(dir, 'book.json'), book); fs.writeFileSync(path.join(dir, 'notes.html'), ''); fs.writeFileSync(path.join(dir, 'outline.html'), ''); writeJSON(path.join(dir, 'darlings.json'), []); writeJSON(path.join(dir, 'stickies.json'), []); return book;
     }
     case 'readBookMeta': return readJSON(bookPath(a, 'book.json'), null);
-    case 'writeBookMeta': { a.modified = new Date().toISOString(); writeJSON(bookPath(a.id, 'book.json'), a); catalog(); return a.modified; }
-    case 'deleteBook': fs.rmSync(bookDir(a), { recursive: true, force: true }); return true;
+    case 'writeBookMeta': { touchBookLock(a.id, clientId); a.modified = new Date().toISOString(); writeJSON(bookPath(a.id, 'book.json'), a); catalog(); return a.modified; }
+    case 'deleteBook': touchBookLock(a, clientId); fs.rmSync(bookDir(a), { recursive: true, force: true }); return true;
     case 'chapterStamps': { const dir = bookPath(a, 'chapters'); const out = {}; if (!fs.existsSync(dir)) return out; for (const f of fs.readdirSync(dir)) if (f.endsWith('.html')) { const s = fs.statSync(path.join(dir, f)); out[f.slice(0, -5)] = s.mtimeMs + ':' + s.size; } return out; }
     case 'readChapter': return readFileOrEmpty(bookPath(a, path.join('chapters', safeName(b) + '.html')));
-    case 'writeChapter': fs.mkdirSync(bookPath(a, 'chapters'), { recursive: true }); fs.writeFileSync(bookPath(a, path.join('chapters', safeName(b) + '.html')), c); return true;
-    case 'deleteChapter': fs.rmSync(bookPath(a, path.join('chapters', safeName(b) + '.html')), { force: true }); return true;
+    case 'writeChapter': touchBookLock(a, clientId); fs.mkdirSync(bookPath(a, 'chapters'), { recursive: true }); fs.writeFileSync(bookPath(a, path.join('chapters', safeName(b) + '.html')), c); return true;
+    case 'deleteChapter': touchBookLock(a, clientId); fs.rmSync(bookPath(a, path.join('chapters', safeName(b) + '.html')), { force: true }); return true;
     case 'readAux': return readFileOrEmpty(bookPath(a, safeName(b) + '.html'));
-    case 'writeAux': fs.writeFileSync(bookPath(a, safeName(b) + '.html'), c); return true;
+    case 'writeAux': touchBookLock(a, clientId); fs.writeFileSync(bookPath(a, safeName(b) + '.html'), c); return true;
     case 'readJSON': return readJSON(bookPath(a, safeName(b) + '.json'), c);
-    case 'writeJSON': writeJSON(bookPath(a, safeName(b) + '.json'), c); return true;
+    case 'writeJSON': touchBookLock(a, clientId); writeJSON(bookPath(a, safeName(b) + '.json'), c); return true;
     case 'importFiles': return (a || []).map((file) => { try { const ext = String(file.name).toLowerCase().split('.').pop(); if (!['txt', 'md'].includes(ext)) throw new Error('Browser import supports .txt and .md files'); return importText(file.name, Buffer.from(file.content, 'base64').toString('utf8')); } catch (err) { return { name: file.name, error: err.message }; } });
-    case 'removeCover': for (const f of fs.readdirSync(bookDir(a))) if (/^cover-\d+\./.test(f)) fs.rmSync(bookPath(a, f)); return true;
+    case 'removeCover': touchBookLock(a, clientId); for (const f of fs.readdirSync(bookDir(a))) if (/^cover-\d+\./.test(f)) fs.rmSync(bookPath(a, f)); return true;
     case 'readCover': return cover(a, b);
-    case 'writeUploadedCover': { const ext = String(b).split('.').pop().toLowerCase(); if (!['png', 'jpg', 'jpeg', 'webp'].includes(ext)) throw new Error('Unsupported cover image'); const file = 'cover-' + Date.now() + '.' + (ext === 'jpeg' ? 'jpg' : ext); fs.writeFileSync(bookPath(a, file), Buffer.from(c, 'base64')); return file; }
+    case 'writeUploadedCover': { touchBookLock(a, clientId); const ext = String(b).split('.').pop().toLowerCase(); if (!['png', 'jpg', 'jpeg', 'webp'].includes(ext)) throw new Error('Unsupported cover image'); const file = 'cover-' + Date.now() + '.' + (ext === 'jpeg' ? 'jpg' : ext); fs.writeFileSync(bookPath(a, file), Buffer.from(c, 'base64')); return file; }
     case 'hasSecret': return false;
     case 'setSecret': return false;
     case 'spellCheckWords': return spellCheck(a || []);
@@ -140,7 +165,7 @@ function staticFile(req, res) {
   fs.readFile(file, (err, data) => { if (err) return send(res, 404, { error: 'Not found' }); const type = file.endsWith('.js') ? 'text/javascript' : file.endsWith('.css') ? 'text/css' : file.endsWith('.json') ? 'application/json' : 'text/html'; res.writeHead(200, { 'Content-Type': type }); res.end(data); });
 }
 const server = require('http').createServer((req, res) => {
-  if (req.method === 'POST' && req.url === '/api') { let raw = ''; req.on('data', (chunk) => { raw += chunk; if (raw.length > 20 * 1024 * 1024) req.destroy(); }); req.on('end', async () => { try { const body = JSON.parse(raw || '{}'); send(res, 200, { ok: true, value: await operation(body.op, body.args) }); } catch (err) { send(res, 400, { ok: false, error: String(err.message || err) }); } }); return; }
+  if (req.method === 'POST' && req.url === '/api') { let raw = ''; req.on('data', (chunk) => { raw += chunk; if (raw.length > 20 * 1024 * 1024) req.destroy(); }); req.on('end', async () => { try { const body = JSON.parse(raw || '{}'); send(res, 200, { ok: true, value: await operation(body.op, body.args, body.clientId) }); } catch (err) { send(res, 400, { ok: false, error: String(err.message || err) }); } }); return; }
   if (req.method === 'GET' && req.url.startsWith('/cover/')) { const [, , id, file] = req.url.split('/'); const data = cover(decodeURIComponent(id), decodeURIComponent(file)); if (!data) return send(res, 404, { error: 'Not found' }); res.writeHead(200, { 'Content-Type': data.mime, 'Cache-Control': 'no-store' }); return res.end(Buffer.from(data.base64, 'base64')); }
   if (req.method === 'GET') return staticFile(req, res); send(res, 405, { error: 'Method not allowed' });
 });

@@ -53,7 +53,9 @@ paths. Browser imports currently support `.txt` and `.md`; browser downloads
 support text, HTML, DOCX, and EPUB exports. PDF printing, encrypted desktop
 secrets, AI cover painting, native window controls, and desktop auto-updates
 remain Electron-only. The browser deployment also has no authentication, so
-it should only be exposed to trusted users or behind an appropriate proxy.
+it should only be exposed to trusted users or behind an appropriate proxy. A
+book opened in another browser instance is highlighted and made read-only;
+the server lease prevents competing tabs from overwriting each other.
 
 ## Maintaining the fork
 

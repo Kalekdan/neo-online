@@ -485,6 +485,30 @@ function chapterWords(chId) {
 /* ================================================================== */
 
 let libraryDirPath = '';
+let bookReadOnly = false;
+let bookLockTimer = null;
+
+function applyBookLockState() {
+  const editor = $('#editor-view');
+  editor.classList.toggle('book-locked', bookReadOnly);
+  $('#book-lock-warning').hidden = !bookReadOnly;
+  editor.querySelectorAll('[contenteditable]').forEach((el) => { el.contentEditable = bookReadOnly ? 'false' : 'true'; });
+  editor.querySelectorAll('button, .tab').forEach((el) => { if (el.id !== 'back-to-shelf') el.disabled = bookReadOnly; });
+}
+
+async function releaseBookLock() {
+  clearInterval(bookLockTimer);
+  bookLockTimer = null;
+  if (book && window.neo.releaseBook) await window.neo.releaseBook(book.id).catch(() => {});
+}
+
+function startBookLock(bookId) {
+  clearInterval(bookLockTimer);
+  if (!window.neo.lockBook) return;
+  bookLockTimer = setInterval(() => {
+    if (book && !bookReadOnly && book.id === bookId && window.neo.touchBookLock) window.neo.touchBookLock(bookId).catch(() => {});
+  }, 15000);
+}
 
 function coverUrl(meta) {
   // Pocket serves the library through a URL; desktop hands a plain path
@@ -619,6 +643,7 @@ async function shelfMeta(bookId) {
 // read-only, so the assignment threw and app.js stopped loading.
 function writeBookMeta(bookId, meta) {
   bookMetaCache.delete(bookId);
+  if (bookReadOnly) return Promise.resolve(false);
   return window.neo.writeBookMeta(bookId, meta);
 }
 
@@ -2126,6 +2151,12 @@ async function openBook(bookId) {
   tabPlaces = {}; // a fresh book starts with fresh places
   book = await window.neo.readBookMeta(bookId);
   if (!book) return;
+  bookReadOnly = false;
+  if (window.neo.lockBook) {
+    const lock = await window.neo.lockBook(bookId);
+    bookReadOnly = !!(lock && lock.locked);
+    startBookLock(bookId);
+  }
   currentChapterId = null; // never carry a chapter reference across books
   undoStack = [];
   chapterHTML = {};
@@ -2141,6 +2172,7 @@ async function openBook(bookId) {
 
   $('#bookshelf-view').hidden = true;
   $('#editor-view').hidden = false;
+  applyBookLockState();
   document.execCommand('defaultParagraphSeparator', false, 'p');
 
   $('#tp-title').textContent = isUntitled(book.title) ? '' : book.title;
@@ -5643,6 +5675,7 @@ buildWebMenu();
 // refreshFromDisk, tell another device's edits from its own.
 function persistChapter(chId, html) {
   if (!book) return Promise.resolve(false);
+  if (bookReadOnly) return Promise.resolve(false);
   if (html === undefined) html = chapterHTML[chId] || '';
   const before = savedHTML[chId];
   savedHTML[chId] = html;
@@ -5690,7 +5723,7 @@ function scheduleMetaSave() {
   saveTimers.meta = setTimeout(saveMeta, 800);
 }
 async function saveMeta() {
-  if (!book) return;
+  if (!book || bookReadOnly) return;
   const sig = metaSig(book);
   const stamp = await writeBookMeta(book.id, book);
   if (book && typeof stamp === 'string') book.modified = stamp;
@@ -5698,7 +5731,7 @@ async function saveMeta() {
 }
 
 function flushAllSaves(e) {
-  if (!book) return;
+  if (!book || bookReadOnly) return;
   // remember where you were, for next session and for the other device:
   // the chapter, the paragraph and the letter (the same place on any
   // screen) plus the scroll (this screen's). `at` changes only when the
@@ -5958,15 +5991,17 @@ document.addEventListener('visibilitychange', () => {
   else if (book) flushAllSaves(); // iOS may end a backgrounded app without warning
 });
 
-window.addEventListener('beforeunload', flushAllSaves);
+window.addEventListener('beforeunload', (e) => { flushAllSaves(e); if (book && window.neo.releaseBook) window.neo.releaseBook(book.id).catch(() => {}); });
 // flush whenever focus leaves NEO, and every 20 seconds
 window.addEventListener('blur', () => { if (book) flushAllSaves(); });
 setInterval(() => { if (book) flushAllSaves('tick'); }, 20000);
 
 async function backToShelf() {
   flushAllSaves();
+  await releaseBookLock();
   tabPlaces = {};
   book = null;
+  bookReadOnly = false;
   currentChapterId = null;
   undoStack = [];
   $('#editor-view').hidden = true;

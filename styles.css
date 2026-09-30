@@ -33,6 +33,17 @@ html, body {
 button { font: inherit; cursor: pointer; }
 [hidden] { display: none !important; }
 .soft { color: var(--muted); font-size: 12px; }
+#book-lock-warning {
+  position: fixed; top: 38px; left: 50%; z-index: 550;
+  transform: translateX(-50%); display: flex; gap: 8px; align-items: baseline;
+  padding: 8px 14px; color: #211b14; background: #d9b86c;
+  border: 1px solid #f0d58e; border-radius: 4px;
+  box-shadow: 0 4px 16px rgba(0,0,0,.3); font-size: 12px;
+}
+#book-lock-warning span { opacity: .8; }
+#editor-view.book-locked [contenteditable] { pointer-events: none; opacity: .7; }
+#editor-view.book-locked button:not(#back-to-shelf),
+#editor-view.book-locked .tab { pointer-events: none; opacity: .55; }
 
 /* The browser has no native Electron menu, so web-bridge.js enables this bar. */
 #web-menubar {

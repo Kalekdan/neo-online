@@ -4,7 +4,8 @@ if (!window.neo) {
   (() => {
     document.documentElement.classList.add('web-version');
     document.getElementById('web-menubar')?.removeAttribute('hidden');
-    const call = (op, ...args) => fetch('/api', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ op, args }) }).then((r) => r.json()).then((r) => { if (!r.ok) throw new Error(r.error); return r.value; });
+    const clientId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+    const call = (op, ...args) => fetch('/api', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ op, args, clientId }) }).then((r) => r.json()).then((r) => { if (!r.ok) throw new Error(r.error); return r.value; });
     const locale = (() => { try { const x = new XMLHttpRequest(); x.open('GET', '/locales/en.json', false); x.send(); return { locale: 'en', dict: {}, base: x.status === 200 ? JSON.parse(x.responseText) : {} }; } catch { return { locale: 'en', dict: {}, base: {} }; } })();
     const chooseFile = (accept) => new Promise((resolve) => { const input = document.createElement('input'); input.type = 'file'; input.accept = accept; input.onchange = () => resolve(input.files[0] || null); input.click(); });
     const asBase64 = (file) => new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result.split(',')[1]); reader.onerror = reject; reader.readAsDataURL(file); });
@@ -44,7 +45,7 @@ if (!window.neo) {
     }, true);
     window.neo = {
       i18n: locale,
-      readLibrary: () => call('readLibrary'), writeLibrary: (x) => call('writeLibrary', x), libraryPath: () => call('libraryPath'), createBook: (x) => call('createBook', x), listBooks: () => call('listBooks'), readBookMeta: (x) => call('readBookMeta', x), writeBookMeta: (x, y) => call('writeBookMeta', y), deleteBook: (x) => call('deleteBook', x),
+      readLibrary: () => call('readLibrary'), writeLibrary: (x) => call('writeLibrary', x), libraryPath: () => call('libraryPath'), createBook: (x) => call('createBook', x), listBooks: () => call('listBooks'), readBookMeta: (x) => call('readBookMeta', x), writeBookMeta: (x, y) => call('writeBookMeta', y), deleteBook: (x) => call('deleteBook', x), lockBook: (x) => call('lockBook', x), releaseBook: (x) => call('releaseBook', x), touchBookLock: (x) => call('touchBookLock', x),
       readChapter: (x, y) => call('readChapter', x, y), chapterStamps: (x) => call('chapterStamps', x), writeChapter: (x, y, z) => call('writeChapter', x, y, z), deleteChapter: (x, y) => call('deleteChapter', x, y), readAux: (x, y) => call('readAux', x, y), writeAux: (x, y, z) => call('writeAux', x, y, z), readJSON: (x, y, z) => call('readJSON', x, y, z), writeJSON: (x, y, z) => call('writeJSON', x, y, z),
       readCover: (x, y) => call('readCover', x, y), removeCover: (x) => call('removeCover', x), pickCover: () => chooseFile('image/png,image/jpeg,image/webp'), setCover: (x, file) => file instanceof File ? upload(file, x) : null,
       hasSecret: () => false, setSecret: () => false, paintCover: () => Promise.reject(new Error('Cover painting is not configured for the browser bridge')),
