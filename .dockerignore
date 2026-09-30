@@ -1,0 +1,11 @@
+# Build context exclusions for the web-only self-hosted NEO image.
+# Electron sources stay in the repository but are not packaged as a desktop app.
+node_modules
+NEO Library
+.git
+.gitignore
+Backups
+dist
+pocket/android/.gradle
+pocket/android/app/build
+pocket/ios/App/App.xcworkspace

@@ -92,6 +92,17 @@ npm install
 npm start
 ```
 
+### Self-hosted browser version
+
+The browser version keeps the same renderer and `window.neo` contract as the
+Electron app. Run `npm install`, then `npm run start:web` and open
+`http://localhost:3000`. It stores plain library files in `NEO Library` next
+to the application; set `NEO_LIBRARY_DIR` to change that location. Docker
+users can build the included `Dockerfile` and mount `/data` for persistence.
+
+The Electron-to-web replacements and browser feature differences are recorded
+in [ONLINE.MD](ONLINE.MD).
+
 **View → Keyboard Shortcuts…** opens the shortcut reference. You can also press `Cmd+/` on macOS or `Ctrl+/` on Windows and Linux, or use **Help → NEO Shortcuts**.
 
 To build installers: `npm install electron-builder --save-dev`, then `npm run package` (macOS), `npm run package:win` (Windows), or `npm run package:all`. Output lands in `dist/`.
