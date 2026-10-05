@@ -21,4 +21,12 @@ public class NeoBarsPlugin extends Plugin {
         }
         call.resolve(new JSObject());
     }
+
+    // Whether a physical keyboard is attached right now (see MainActivity)
+    @PluginMethod
+    public void keyboard(PluginCall call) {
+        JSObject out = new JSObject();
+        out.put("hardware", MainActivity.hardwareKeyboard(getContext().getResources().getConfiguration()));
+        call.resolve(out);
+    }
 }

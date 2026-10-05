@@ -297,6 +297,13 @@ const NeoCovers = (() => {
   // a word's lookup form: lowercase letters, accents stripped (é → e, ё → е)
   const connKey = (w) => w.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase().replace(/[^\p{L}]/gu, '');
   const CONNECTORS = new Set(['the', 'of', 'a', 'an', 'and', 'in', 'on', 'to', 'for', 'at', 'by', 'from', 'or', 'with', 'is', 'are', 'my', 'your', 'our', 'his', 'her', 'its',
+    // el — Greek connector words
+    'ο', 'η', 'το', 'οι', 'τα',
+    'του', 'της', 'των',
+    'ενας', 'ενα', 'μια',
+    'και', 'κι', 'η',
+    'σε', 'στο', 'στη', 'στην', 'στον', 'στους', 'στις',
+    'με', 'για', 'απο', 'προς', 'ως', 'που',
     // small words of the other languages NEO speaks, so their titles set as
     // gracefully as English ones (accents are stripped before the lookup)
     'le', 'la', 'les', 'un', 'une', 'des', 'du', 'de', 'et', 'en', 'au', 'aux', 'sur', 'pour', 'par', 'dans', 'ou', 'avec', 'mon', 'ma', 'mes', 'ton', 'ta', 'tes', 'son', 'sa', 'ses', // fr

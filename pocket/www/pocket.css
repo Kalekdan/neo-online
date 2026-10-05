@@ -5,6 +5,13 @@
 #paper-scroll { width: 100%; }
 #paper, #aux-paper { width: 100%; max-width: 100%; margin: 0 0 80px; }
 .sheet, #aux-paper { padding: 34px 26px 60px; box-shadow: none; border: none; min-height: 92vh; }
+/* On a tablet the page is a page, not the whole screen: the same width as on
+   the desktop, centered, so a line stays one the eye can follow (#243). A phone
+   in portrait is narrower than this and still fills the fold. */
+@media (min-width: 600px) {
+  #paper, #aux-paper { max-width: calc(680px * var(--page-zoom, 1)); margin: 0 auto 80px; }
+  .sheet, #aux-paper { padding: 50px 56px 70px; }
+}
 
 /* touch has no hover: the panes open on an edge swipe (see index.html) or the ☰ button */
 #nav-hotzone, #side-hotzone { display: none; }
@@ -108,3 +115,23 @@ body.light .book { box-shadow: 2px 3px 6px rgba(0,0,0,0.2); }
    isn't written here (the Outline is where it's written), and an empty one
    takes no room */
 .nav-note.nav-note-ro:empty { display: none; }
+/* …and no + seams between the boxes: chapters are added from the
+   + Chapter button at the bottom, or with Enter three times */
+#nav-list .nav-gap { display: none; }
+
+/* Undo / redo, above the on-screen keyboard while it's up (a physical
+   keyboard has ⌘Z / Ctrl+Z) — see index.html */
+#pocket-undo {
+  position: fixed; right: 12px; bottom: calc(62px + var(--kb)); z-index: 85;
+  display: flex; gap: 2px; padding: 2px;
+  background: #242424; border: 1px solid #333; border-radius: 22px;
+}
+#pocket-undo[hidden] { display: none; }
+#pocket-undo button {
+  background: none; border: none; color: #d6d2c6; width: 44px; height: 40px;
+  display: flex; align-items: center; justify-content: center; padding: 0;
+}
+#pocket-undo button:disabled { color: #5e5b55; }
+body.light #pocket-undo { background: #f1eee8; border-color: #dcd7ce; }
+body.light #pocket-undo button { color: #2b2926; }
+body.light #pocket-undo button:disabled { color: #b0aa9f; }

@@ -13,7 +13,29 @@ permissions:
   contents: write
 
 jobs:
+  # The installers are named from package.json, and the updater offers an
+  # update only when latest.yml names a newer version than the one installed.
+  # A tag that disagrees with package.json ships a release that calls itself
+  # the old version, which nobody is ever offered. (v1.2.3 did.) The step
+  # runs on every build and checks only when a tag started it, so the jobs
+  # below can always depend on it.
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag matches package.json
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          pkg=$(node -p "require('./package.json').version")
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$pkg" != "$tag" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME would build as version $pkg. Set \"version\" in package.json (and package-lock.json) to $tag, commit, and tag again."
+            exit 1
+          fi
+          echo "Tag $GITHUB_REF_NAME matches package.json ($pkg)."
+
   windows:
+    needs: version
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,6 +45,17 @@ jobs:
       - run: npm install
       - run: npm install electron-builder --save-dev
       - run: npx electron-builder --win --publish never
+      # The updater downloads the file latest.yml names. GitHub turns spaces
+      # in uploaded names into dots, so a name with a space is one the
+      # updater can never find (Windows updates failed this way through 1.2.4).
+      - name: latest.yml names a file that will upload as named
+        shell: bash
+        run: |
+          want=$(sed -n 's/^path: *//p' dist/latest.yml)
+          if [ -z "$want" ] || [ ! -f "dist/$want" ] || [[ "$want" == *" "* ]]; then
+            echo "::error::latest.yml points at '$want', which isn't a file in dist/ with a space-free name:"; ls dist; exit 1
+          fi
+          echo "latest.yml points at dist/$want"
       - name: Smoke test — app boots and creates its library
         shell: pwsh
         run: |
@@ -56,6 +89,7 @@ jobs:
             dist/*.blockmap
 
   mac:
+    needs: version
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -107,6 +141,7 @@ jobs:
           gh release upload "$GITHUB_REF_NAME" dist/*.dmg dist/*-mac.zip dist/latest-mac.yml dist/*.blockmap --clobber
 
   linux:
+    needs: version
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

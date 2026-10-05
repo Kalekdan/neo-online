@@ -31,7 +31,8 @@ function spellWorker() {
       postMessage: (message) => { reply = message; }
     } }
   });
-  vm.runInContext(source('spell-worker.js'), context);
+  // The string is the file on disk. filename is how Node attributes coverage to it.
+  vm.runInContext(source('spell-worker.js'), context, { filename: path.join(root, 'spell-worker.js') });
   let id = 0;
   const waiting = new Map();
   reply = null;
@@ -192,7 +193,8 @@ function mainContext(temp, systemLocale, settings = {}, library = {}, raw = null
     console,
     temp
   });
-  vm.runInContext(source('main.js'), context);
+  // The string is the file on disk. filename is how Node attributes coverage to it.
+  vm.runInContext(source('main.js'), context, { filename: path.join(root, 'main.js') });
   vm.runInContext('LIBRARY_DIR = temp; LIBRARY_FILE = require("path").join(temp, "library.json"); initLanguage(); initSpell();', context);
   return { context, loads, handlers, read: () => JSON.parse(fs.readFileSync(path.join(temp, 'library.json'))) };
 }

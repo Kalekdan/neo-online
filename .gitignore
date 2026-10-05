@@ -23,9 +23,12 @@ pocket/www/fonts/
 pocket/www/i18n.js
 pocket/www/jszip.min.js
 pocket/www/locales/
+pocket/www/hunspell/
+pocket/www/dict/
 
 # working files beside the repo, never part of it
 Claude outputs/
 
 # local library (if not configured)
 /NEO Library/*
+docs/sessions/

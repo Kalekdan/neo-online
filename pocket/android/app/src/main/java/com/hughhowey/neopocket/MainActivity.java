@@ -1,6 +1,7 @@
 package com.hughhowey.neopocket;
 
 import android.content.Intent;
+import android.content.res.Configuration;
 import android.graphics.Color;
 import android.graphics.drawable.ColorDrawable;
 import android.net.Uri;
@@ -120,6 +121,23 @@ public class MainActivity extends BridgeActivity {
             askedForFilesAccess = false;
             getBridge().getWebView().reload();
         }
+    }
+
+    // Is a physical keyboard attached (Bluetooth, USB, a keyboard case)? The
+    // page keeps Android's on-screen keyboard down while one is, and lets it
+    // up when there isn't one, so a writer typing on the glass can type.
+    static boolean hardwareKeyboard(Configuration c) {
+        return c.keyboard != Configuration.KEYBOARD_NOKEYS
+            && c.hardKeyboardHidden == Configuration.HARDKEYBOARDHIDDEN_NO;
+    }
+
+    // A keyboard connected or disconnected: tell the page
+    @Override
+    public void onConfigurationChanged(Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        if (getBridge() == null) return;
+        getBridge().getWebView().evaluateJavascript(
+            "window.pocketHardwareKeyboard && window.pocketHardwareKeyboard(" + hardwareKeyboard(newConfig) + ")", null);
     }
 
     private boolean hasFilesAccess() {

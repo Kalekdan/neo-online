@@ -13,6 +13,12 @@ vm.runInContext(app.slice(app.indexOf('const DIALOGUE_DASHES'), app.indexOf('fun
 vm.runInContext('this.api = { DIALOGUE_DASHES, dialogueDashes, dialogueDashEdits, dashRuns };', context);
 const { DIALOGUE_DASHES, dialogueDashes, dialogueDashEdits, dashRuns } = context.api;
 
+// …and the count that decides which way a quote typed after a dash faces
+const quotes = vm.createContext({});
+vm.runInContext(app.slice(app.indexOf('function quoteOpenIn('), app.indexOf('// The quotation marks of the language being written')), quotes);
+vm.runInContext('this.api = { quoteOpenIn };', quotes);
+const { quoteOpenIn } = quotes.api;
+
 const pt = DIALOGUE_DASHES.pt;
 const es = DIALOGUE_DASHES.es;
 const en = DIALOGUE_DASHES.en;
@@ -81,6 +87,37 @@ test('pasted bold and italic keep their runs', () => {
   dashRuns(runs, pt, { start: true, end: true });
   assert.deepEqual(runs.map((r) => r.text), ['— ', 'Não', undefined, ' — disse ela —']);
   assert.equal(runs[1].i, true);
+});
+
+test('a quote after a dash closes speech that is open, and opens one that is not', () => {
+  const en = { open: '“', close: '”' };
+  const de = { open: '„', close: '“' };
+  const single = { open: '‘', close: '’' };
+  // open: the next quote closes it
+  assert.equal(quoteOpenIn('“I was just—', en), true);
+  assert.equal(quoteOpenIn('He said, “I was just—', en), true);
+  assert.equal(quoteOpenIn('“Wait—” he said. “And then—', en), true);
+  assert.equal(quoteOpenIn('„Ich war—', de), true);
+  assert.equal(quoteOpenIn('‘I wasn’t going to—', single), true);
+  // not open: the next quote opens one
+  assert.equal(quoteOpenIn('He stopped—', en), false);
+  assert.equal(quoteOpenIn('“Hello,” she said—', en), false);
+  assert.equal(quoteOpenIn('“Wait—” he said—', en), false);
+  assert.equal(quoteOpenIn('She wasn’t sure—', single), false);
+});
+
+test('straight quotes pair up in turn, beside curly ones or alone', () => {
+  const en = { open: '“', close: '”' };
+  // imported or pasted from a plain-text editor
+  assert.equal(quoteOpenIn('"I was just—', en, '"'), true);
+  assert.equal(quoteOpenIn('He said, "I was just—', en, '"'), true);
+  assert.equal(quoteOpenIn('"Wait—" he said. "And then—', en, '"'), true);
+  assert.equal(quoteOpenIn('"Wait—" he said—', en, '"'), false);
+  assert.equal(quoteOpenIn('"Hello," she said. “I was just—', en, '"'), true);
+  assert.equal(quoteOpenIn('“Hello,” she said, "I was just—', en, '"'), true);
+  assert.equal(quoteOpenIn('"Hello," she said—', en, '"'), false);
+  // a single-quote key has no straight mark to count: ' is mostly an apostrophe
+  assert.equal(quoteOpenIn("He didn't know—", { open: '‘', close: '’' }), false);
 });
 
 // objects made in the vm context compare by value outside it

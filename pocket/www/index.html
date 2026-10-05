@@ -129,6 +129,12 @@
       <button id="pocket-more" title="Format, focus, goals">&#8943;</button>
     </footer>
 
+    <!-- Undo / redo, while the on-screen keyboard is up -->
+    <div id="pocket-undo" hidden>
+      <button id="pocket-undo-btn" aria-label="Undo"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg></button>
+      <button id="pocket-redo-btn" aria-label="Redo"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 14 5-5-5-5"/><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13"/></svg></button>
+    </div>
+
     <!-- The ⋯ sheet: the desktop's Format and View menus, on one page -->
     <div id="pocket-menu" hidden>
       <div id="pocket-menu-sheet"></div>
@@ -211,20 +217,29 @@
         opts.map(([v, t]) => `<button class="${v === current ? 'on' : ''}" data-msg='${JSON.stringify(mk(v))}'>${t}</button>`).join('') + '</span></div>';
       const tick = (label, on, msg) => `<div class="pm-row"><span class="pm-label">${label}</span><span class="pm-seg"><button class="${on ? 'on' : ''}" data-msg='${JSON.stringify(msg)}'>${on ? '✓ On' : 'Off'}</button></span></div>`;
       const choices = (typeof BODY_FONT_CHOICES !== 'undefined') ? BODY_FONT_CHOICES : ['Georgia'];
+      // a script is set in Courier Prime, its lines are its elements, and it leaves as Fountain
+      const script = typeof book !== 'undefined' && book && typeof isScript === 'function' && isScript();
       sheet.innerHTML =
-        `<div class="pm-row pm-fonts"><span class="pm-label">Typeface</span><span class="pm-seg pm-wrap">` +
-          choices.map((f) => `<button class="${fonts.body === f ? 'on' : ''}" data-msg='${JSON.stringify({ type: 'bodyFont', value: f })}' style="font-family:${f}">${f}</button>`).join('') + '</span></div>' +
+        (script ? '' : `<div class="pm-row pm-fonts"><span class="pm-label">Typeface</span><span class="pm-seg pm-wrap">` +
+          choices.map((f) => `<button class="${fonts.body === f ? 'on' : ''}" data-msg='${JSON.stringify({ type: 'bodyFont', value: f })}' style="font-family:${f}">${f}</button>`).join('') + '</span></div>') +
         seg('Text size', [[-1, 'Smaller'], [0, 'Reset'], [1, 'Larger']], null, (v) => ({ type: 'fontSize', value: v })) +
-        seg('Drop cap', [['literary', 'Literary'], ['fantasy', 'Fantasy'], ['scifi', 'Sci-Fi'], ['none', 'Off']], fonts.dropcap || 'literary', (v) => ({ type: 'dropCap', value: v })) +
+        (script ? '' : seg('Drop cap', [['literary', 'Literary'], ['fantasy', 'Fantasy'], ['scifi', 'Sci-Fi'], ['none', 'Off']], fonts.dropcap || 'literary', (v) => ({ type: 'dropCap', value: v }))) +
         seg('Page', [['night', 'Night'], ['paper', 'Paper'], ['light', 'Light']], lib.pageTheme || 'night', (v) => ({ type: 'pageTheme', value: v })) +
         seg('Focus mode', [['off', 'Off'], ['paragraph', 'Paragraph'], ['sentence', 'Sentence']], focusNow, (v) => ({ type: 'focus', value: v })) +
         tick('Typewriter scrolling', st.typewriter, { type: 'typewriter' }) +
-        tick('Poetry paragraph  ⇧Enter', st.poetry, { type: 'poetry' }) +
+        tick('Spellcheck', typeof spellOn !== 'undefined' && spellOn, { type: 'spellcheck' }) +
+        // the dictionary, only while spellcheck is on (the desktop's choice comes along in library.json)
+        (typeof spellOn !== 'undefined' && spellOn && window.pocketSpellLanguages
+          ? `<div class="pm-row"><span class="pm-label">Dictionary</span><span class="pm-seg pm-wrap">` +
+            Object.entries(window.pocketSpellLanguages()).map(([code, name]) => `<button class="${code === (lib.spellLanguage || window.pocketSpellLanguage()) ? 'on' : ''}" data-msg='${JSON.stringify({ type: 'spellLanguage', value: code })}'>${name}</button>`).join('') + '</span></div>'
+          : '') +
+        (script ? '' : tick('Flush paragraph  ⇧Enter', st.flush, { type: 'flush' }) +
+        tick('Poetry paragraph  Ctrl+⇧Enter', st.poetry, { type: 'poetry' })) +
         (window.Capacitor && window.Capacitor.getPlatform && window.Capacitor.getPlatform() === 'ios' ? '' :
-          `<div class="pm-row"><span class="pm-label">On-screen keyboard</span><span class="pm-seg"><button data-act="keyboard">${localStorage.getItem('pocket-soft-keyboard') === 'off' ? 'Off' : '✓ On'}</button></span></div>`) +
+          `<div class="pm-row"><span class="pm-label">On-screen keyboard</span><span class="pm-seg"><button data-act="keyboard">${window.pocketSoftKeyboardOn && !window.pocketSoftKeyboardOn() ? 'Off' : '✓ On'}</button></span></div>`) +
         (typeof book !== 'undefined' && book
           ? `<div class="pm-row"><span class="pm-label">Export</span><span class="pm-seg pm-wrap">` +
-            [['txt', 'Text'], ['md', 'Markdown'], ['html', 'HTML'], ['docx', 'Word'], ['epub', 'EPUB']].map(([f, l]) => `<button data-msg='${JSON.stringify({ type: 'export', format: f })}'>${l}</button>`).join('') + '</span></div>'
+            (script ? [['fountain', 'Fountain'], ['fdx', 'Final Draft']] : [['txt', 'Text'], ['md', 'Markdown'], ['html', 'HTML'], ['docx', 'Word'], ['epub', 'EPUB']]).map(([f, l]) => `<button data-msg='${JSON.stringify({ type: 'export', format: f })}'>${l}</button>`).join('') + '</span></div>'
           : '') +
         `<div class="pm-row pm-actions"><button data-msg='${JSON.stringify({ type: 'stats' })}'>Goals…</button><button data-msg='${JSON.stringify({ type: 'help' })}'>Keyboard shortcuts</button><button data-act="close">Done</button></div>`;
     }
@@ -245,6 +260,7 @@
         send(msg);
         if (msg.type === 'stats' || msg.type === 'help' || msg.type === 'export') { closeMenu(); return; }
         setTimeout(buildMenu, 60); // reflect the new state
+        if (msg.type === 'spellLanguage') setTimeout(buildMenu, 1500); // once the dictionary is in
       }
     });
     document.addEventListener('keydown', (e) => {
@@ -255,6 +271,49 @@
         if (menuWrap.hidden) more.click(); else closeMenu();
       }
     }, true);
+
+    // Undo / redo above the on-screen keyboard. Undo is ⌘Z, so everything
+    // ⌘Z takes back (a capital, a dash, a section break) comes back the same
+    // way; what nothing else claims is the page's own undo. A press keeps
+    // the caret where it is, so the keyboard stays up.
+    const undoBar = document.getElementById('pocket-undo');
+    const undoBtn = document.getElementById('pocket-undo-btn');
+    const redoBtn = document.getElementById('pocket-redo-btn');
+    let keyboardUp = false;
+    const editing = () => {
+      const ae = document.activeElement;
+      return !!(ae && ae.isContentEditable && !document.getElementById('editor-view').hidden);
+    };
+    const refreshUndo = () => {
+      undoBar.hidden = !(keyboardUp && editing());
+      if (undoBar.hidden) return;
+      try {
+        undoBtn.disabled = !document.queryCommandEnabled('undo');
+        redoBtn.disabled = !document.queryCommandEnabled('redo');
+      } catch { undoBtn.disabled = redoBtn.disabled = false; }
+    };
+    const press = (btn, act) => btn.addEventListener('pointerdown', (e) => {
+      e.preventDefault(); // the page keeps the caret, and the keyboard stays
+      if (btn.disabled) return;
+      act();
+      setTimeout(refreshUndo, 30);
+    });
+    press(undoBtn, () => {
+      const target = document.activeElement || document.body;
+      const ev = new KeyboardEvent('keydown', { key: 'z', code: 'KeyZ', ctrlKey: true, bubbles: true, cancelable: true });
+      if (target.dispatchEvent(ev)) document.execCommand('undo');
+    });
+    press(redoBtn, () => document.execCommand('redo'));
+    try {
+      const K = window.Capacitor.Plugins.Keyboard;
+      if (K) {
+        K.addListener('keyboardDidShow', () => { keyboardUp = true; refreshUndo(); });
+        K.addListener('keyboardDidHide', () => { keyboardUp = false; refreshUndo(); });
+      }
+    } catch { /* no keyboard plugin: no bar */ }
+    document.addEventListener('focusin', refreshUndo);
+    document.addEventListener('focusout', () => setTimeout(refreshUndo, 50));
+    document.addEventListener('input', refreshUndo);
 
     document.getElementById('paper-scroll').addEventListener('touchstart', (e) => {
       if (e.touches[0].clientX < EDGE || e.touches[0].clientX > window.innerWidth - EDGE) return;
