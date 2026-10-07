@@ -1,7 +1,7 @@
 {
   "name": "neo",
   "productName": "NEO",
-  "version": "1.3.5",
+  "version": "1.4.2",
   "description": "A word processor for authors. Distraction-free by default.",
   "homepage": "https://github.com/hughhowey/neo",
   "main": "main.js",
@@ -11,6 +11,7 @@
     "test:spellcheck": "node --test scripts/spellcheck.test.js",
     "test:dashes": "node --test scripts/dashes.test.js",
     "test:words": "electron scripts/words.e2e.js",
+    "test:tabs": "electron scripts/tabs.e2e.js",
     "test": "node --test \"scripts/*.test.js\"",
     "test:coverage": "node --test --experimental-test-coverage \"scripts/*.test.js\"",
     "lint": "oxlint",
@@ -100,7 +101,8 @@
     },
     "asarUnpack": [
       "node_modules/dictionary-ro/**",
-      "node_modules/dictionary-pt/**"
+      "node_modules/dictionary-pt/**",
+      "node_modules/dictionary-hu/**"
     ],
     "extraResources": [
       {
@@ -125,10 +127,15 @@
       "!.github/**",
       "!scripts/**",
       "!licenses/**",
+      "!Claude outputs/**",
+      "!dictionaries/**",
       "!locales/_template.json",
       "!node_modules/koffi/build/koffi/{freebsd,linux,musl,openbsd,win32}_*/**",
       "!node_modules/koffi/{src,vendor,doc}/**"
-    ]
+    ],
+    "toolsets": {
+      "appimage": "1.0.3"
+    }
   },
   "author": "Hugh Howey",
   "license": "MIT",
@@ -147,6 +154,7 @@
     "dictionary-en-us": "^2.2.1",
     "dictionary-es": "^4.0.0",
     "dictionary-fr": "^3.0.0",
+    "dictionary-hu": "file:dictionaries/hu",
     "dictionary-nl": "^2.0.0",
     "dictionary-pl": "^2.0.0",
     "dictionary-pt": "4.0.0",

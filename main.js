@@ -6,6 +6,7 @@ const { app, BrowserWindow, ipcMain, dialog, Menu, MenuItem, utilityProcess, scr
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const { Buffer } = require('buffer');
 
 // Every disk request from the page passes through here: a write the system
 // refuses (see reportBlockedWrite) is explained to the writer, then the error
@@ -15,8 +16,10 @@ const os = require('os');
   ipcMain.handle = (channel, fn) => handle(channel, (...args) => {
     // a handler's answer keeps its own timing: sync stays sync
     let out;
-    try { out = fn(...args); } catch (err) { reportBlockedWrite(err); throw err; }
-    if (out && typeof out.then === 'function') out.catch((err) => reportBlockedWrite(err));
+    // (and any failure lands in the error log, named by its channel, for
+    // whatever bug report follows)
+    try { out = fn(...args); } catch (err) { reportBlockedWrite(err); logError('ipc ' + channel, err); throw err; }
+    if (out && typeof out.then === 'function') out.catch((err) => { reportBlockedWrite(err); logError('ipc ' + channel, err); });
     return out;
   });
 }
@@ -24,6 +27,10 @@ const os = require('os');
 // macOS Chromium's "smart delete" also removes whitespace around a deleted
 // selection, and that pass can duplicate characters. Deletes stay literal.
 app.commandLine.appendSwitch('blink-settings', 'smartInsertDeleteEnabled=false');
+// Linux: Chromium hears the system's voices (espeak, Piper, RHVoice…) only
+// through speech-dispatcher, and only when asked to. Without it Read Aloud
+// finds no voice at all (#287).
+if (process.platform === 'linux') app.commandLine.appendSwitch('enable-speech-dispatcher');
 
 // ---------------------------------------------------------------------------
 // Library location: a folder of plain files the user can inspect, sync, back up.
@@ -42,7 +49,9 @@ function readSettings() {
 }
 function writeSettings(obj) {
   fs.mkdirSync(path.dirname(settingsPath()), { recursive: true });
-  fs.writeFileSync(settingsPath(), JSON.stringify(obj, null, 2));
+  // the same whole-or-nothing write as the library: a settings file cut
+  // short would forget a chosen library folder
+  writeFileDurable(settingsPath(), JSON.stringify(obj, null, 2));
 }
 
 // ---------------------------------------------------------------------------
@@ -233,6 +242,35 @@ function useLibraryDir(dir) {
   settings.libraryDir = LIBRARY_DIR;
   try { writeSettings(settings); } catch (err) { logError('settings', err); }
 }
+// The writer's own library folder, missing at launch: a drive not plugged
+// in, a NAS or cloud folder not mounted yet. Never swapped quietly for the
+// default (new books would land there and seem lost when the drive came
+// back). Asked once: Try Again once it's there, Choose Folder…, or Continue
+// with the default folder for this session only; the choice stays saved.
+function isDir(dir) { try { return fs.statSync(dir).isDirectory(); } catch { return false; } }
+function awaitChosenLibrary(chosen) {
+  const fallback = path.join(app.getPath('documents'), 'NEO Library');
+  while (!isDir(chosen)) {
+    const r = dialog.showMessageBoxSync({
+      type: 'warning',
+      message: t('NEO can\'t save in your library folder'),
+      detail: blockedDetail(chosen, { code: 'ENOENT' }),
+      buttons: [t('Try Again'), t('Choose Folder…'), t('Continue')],
+      defaultId: 0,
+      cancelId: 2
+    });
+    if (r === 2) return fallback;
+    if (r === 1) {
+      const picked = dialog.showOpenDialogSync({
+        title: t('Choose a folder for your NEO library'),
+        defaultPath: os.homedir(),
+        properties: ['openDirectory', 'createDirectory']
+      });
+      if (picked && picked[0]) { useLibraryDir(picked[0]); return picked[0]; }
+    }
+  }
+  return chosen;
+}
 // said once, after the window is up, only when it happened
 let libraryFallback = null;
 function announceLibraryFallback() {
@@ -306,9 +344,17 @@ function reportBlockedWrite(err) {
   (win ? dialog.showMessageBox(win, opts) : dialog.showMessageBox(opts)).catch(() => {});
 }
 
+// A brand-new library starts with one empty shelf. A library.json that has
+// gone missing beside its spare copies or its books is not a new library:
+// library:read recovers it (from .tmp/.bak, else from the book folders)
+// instead of an empty seed hiding every book.
+function libraryHasHistory() {
+  if (fs.existsSync(LIBRARY_FILE + '.bak') || fs.existsSync(LIBRARY_FILE + '.tmp')) return true;
+  try { return fs.readdirSync(LIBRARY_DIR).some((d) => d.startsWith('book-')); } catch { return false; }
+}
 function ensureLibrary() {
   if (!fs.existsSync(LIBRARY_DIR)) fs.mkdirSync(LIBRARY_DIR, { recursive: true });
-  if (!fs.existsSync(LIBRARY_FILE)) {
+  if (!fs.existsSync(LIBRARY_FILE) && !libraryHasHistory()) {
     const seed = {
       authorName: '',
       penNames: [],
@@ -353,10 +399,15 @@ function writeCatalog() {
       } catch { /* not a valid book folder */ }
     }
     lines.sort((a, b) => a.localeCompare(b));
-    fs.writeFileSync(path.join(LIBRARY_DIR, '_catalog.txt'),
-      t('NEO LIBRARY CATALOG — which folder is which book') + '\n' +
+    const text = t('NEO LIBRARY CATALOG — which folder is which book') + '\n' +
       t('(regenerated automatically; edits here do nothing)') + '\n\n' +
-      lines.join('\n') + '\n');
+      lines.join('\n') + '\n';
+    const file = path.join(LIBRARY_DIR, '_catalog.txt');
+    // unchanged, it's left alone: a rewrite on every save is a file for
+    // iCloud and Syncthing to send back and forth (and to clash over)
+    let old = null;
+    try { old = fs.readFileSync(file, 'utf8'); } catch { /* none yet */ }
+    if (old !== text) fs.writeFileSync(file, text);
   } catch (err) {
     logError('catalog', err);
   }
@@ -368,16 +419,39 @@ function writeCatalog() {
 // done and the words not: an empty book.json, and the book gone from its
 // shelf (#219). A missing file or an unlucky moment never costs more than
 // the last few seconds.
+// On Windows the swap is refused while anything else has the file open, even
+// for a moment: antivirus looking at what was just written, the search
+// indexer, a backup or sync client, a tool reading the library. Wait a beat
+// and try again (up to ~0.6 s) before calling the save failed, so a passing
+// glance never reaches the writer as "NEO can't save". A folder that really
+// refuses writes still fails, and is still explained.
+const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+function renameIntoPlace(from, to) {
+  for (let wait = 5; ; wait *= 2) {
+    try { return fs.renameSync(from, to); } catch (err) {
+      if (process.platform !== 'win32' || wait > 320 || !['EPERM', 'EACCES', 'EBUSY'].includes(err.code)) throw err;
+      sleepSync(wait);
+    }
+  }
+}
+
 function writeFileDurable(file, data) {
   const tmp = file + '.tmp';
+  const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
   const fd = fs.openSync(tmp, 'w');
   try {
-    fs.writeSync(fd, typeof data === 'string' ? data : Buffer.from(data));
+    // a write can take less than it was given; keep going until every byte
+    // is down, and never swap in a file that's only partly written
+    for (let off = 0; off < buf.length;) {
+      const n = fs.writeSync(fd, buf, off, buf.length - off);
+      if (!(n > 0)) throw Object.assign(new Error('Short write: ' + tmp), { code: 'EIO', path: tmp });
+      off += n;
+    }
     fs.fsyncSync(fd);
   } finally {
     fs.closeSync(fd);
   }
-  fs.renameSync(tmp, file);
+  renameIntoPlace(tmp, file);
   // the swap itself, on systems that let a folder be pushed too
   if (process.platform !== 'win32') {
     try { const d = fs.openSync(path.dirname(file), 'r'); try { fs.fsyncSync(d); } finally { fs.closeSync(d); } } catch { /* fine */ }
@@ -393,7 +467,7 @@ function parseJSONFile(file) {
 function readJSON(file, fallback) {
   const main = parseJSONFile(file);
   if (main !== undefined) return main;
-  if (!fs.existsSync(file) && !fs.existsSync(file + '.bak')) return fallback;
+  if (!fs.existsSync(file) && !fs.existsSync(file + '.bak') && !fs.existsSync(file + '.tmp')) return fallback;
   for (const spare of [file + '.tmp', file + '.bak']) {
     const v = parseJSONFile(spare);
     if (v === undefined) continue;
@@ -508,14 +582,26 @@ ipcMain.handle('library:listBooks', () => {
     for (const d of fs.readdirSync(LIBRARY_DIR)) {
       if (!d.startsWith('book-')) continue;
       const m = readJSON(path.join(LIBRARY_DIR, d, 'book.json'), null);
-      if (m && m.id) out.push({ id: m.id, title: m.title || t('Untitled'), author: m.author || '', modified: m.modified || '', kind: m.kind || '' });
+      // the folder is the book: a copied folder ("book-x copy") is its own
+      // book, even though the book.json inside still names the original
+      if (m && m.id) out.push({ id: d, title: m.title || t('Untitled'), author: m.author || '', modified: m.modified || '', kind: m.kind || '' });
     }
   } catch (err) { logError('listBooks', err); }
   return out;
 });
 
 ipcMain.handle('book:readMeta', (_e, bookId) => {
-  return readJSON(path.join(bookDir(bookId), 'book.json'), null) || rebuildBookMeta(bookId);
+  const dir = bookDir(bookId);
+  const meta = readJSON(path.join(dir, 'book.json'), null);
+  if (meta) {
+    if (meta.id !== bookId) meta.id = bookId; // a copied folder answers to its own name
+    return meta;
+  }
+  // iCloud (on older macOS) holds a file it hasn't downloaded as
+  // ".book.json.icloud": the book is there, just not here yet. Rebuilding
+  // it would put a bare book.json over the real one.
+  if (fs.existsSync(path.join(dir, '.book.json.icloud'))) return null;
+  return rebuildBookMeta(bookId);
 });
 
 ipcMain.handle('book:writeMeta', (_e, bookId, meta) => {
@@ -553,13 +639,38 @@ ipcMain.handle('chapter:read', (_e, bookId, chapterId) => {
   }
 });
 
-ipcMain.handle('chapter:write', (_e, bookId, chapterId, html) => {
+// `expected` is the text the window last read or wrote for this chapter.
+// When the file holds something else (another device wrote it since, and
+// it isn't just an older copy of these words), nothing is written: the
+// window is handed that text to keep as its own chapter first, so neither
+// version is lost to a save that happened before the next look at the disk.
+ipcMain.handle('chapter:write', (_e, bookId, chapterId, html, expected) => {
   const dir = path.join(bookDir(bookId), 'chapters');
   const file = path.join(dir, libName(chapterId) + '.html');
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  if (typeof expected === 'string') {
+    let cur = null;
+    try { cur = fs.readFileSync(file, 'utf8'); } catch { /* not there: nothing to keep */ }
+    if (cur !== null && chapterDiverged(cur, expected, html)) return { conflict: cur };
+  }
   writeFileDurable(file, html);
   return true;
 });
+// shared with Pocket's bridge (same rule): the disk copy differs from what
+// this device last knew, holds words, and has a word the new text lacks
+function chapterDiverged(cur, expected, html) {
+  if (cur === expected || cur === html) return false;
+  const bag = (h) => {
+    const m = new Map();
+    for (const w of String(h || '').replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').split(/\s+/)) if (w) m.set(w, (m.get(w) || 0) + 1);
+    return m;
+  };
+  const there = bag(cur);
+  if (!there.size) return false;
+  const here = bag(html);
+  for (const [w, n] of there) if (n > (here.get(w) || 0)) return true;
+  return false;
+}
 
 ipcMain.handle('chapter:delete', (_e, bookId, chapterId) => {
   const file = path.join(bookDir(bookId), 'chapters', libName(chapterId) + '.html');
@@ -651,9 +762,13 @@ ipcMain.handle('cover:set', (_e, bookId, srcPath) => {
   if (!COVER_EXTS.includes(ext)) return null;
   const dir = bookDir(bookId);
   if (!fs.existsSync(dir)) return null;
-  clearCovers(dir);
+  // the new cover is copied in before the old ones go (the picked file may
+  // be one of them)
   const fname = 'cover-' + Date.now() + '.' + (ext === 'jpeg' ? 'jpg' : ext);
   fs.copyFileSync(srcPath, path.join(dir, fname));
+  for (const f of fs.readdirSync(dir)) {
+    if (/^cover-\d+\./.test(f) && f !== fname) fs.unlinkSync(path.join(dir, f));
+  }
   return fname;
 });
 
@@ -791,6 +906,17 @@ ipcMain.handle('fullscreen:escape', (e) => {
 // A script prints on US letter whatever the country (the industry's page),
 // with the margins laid out in the page itself
 const SCREENPLAY_PRINT = { pageSize: 'Letter', margins: { top: 0, bottom: 0, left: 0, right: 0 }, printBackground: false, preferCSSPageSize: true, generateTaggedPDF: true, generateDocumentOutline: false };
+// Letter is a habit of the Americas (and the Philippines); most of the world
+// prints A4. The computer's region decides, for the PDF and the Word file
+// alike. (A script is Letter everywhere: SCREENPLAY_PRINT.)
+const LETTER_COUNTRIES = ['US', 'CA', 'MX', 'PH', 'CL', 'CO', 'VE', 'GT', 'CR', 'PA', 'DO', 'PR', 'SV', 'HN', 'NI', 'BZ'];
+function paperSize() {
+  let cc = '';
+  try { cc = app.getLocaleCountryCode() || ''; } catch { /* unknown */ }
+  return LETTER_COUNTRIES.includes(cc.toUpperCase()) ? 'Letter' : 'A4';
+}
+ipcMain.on('paper:get', (e) => { e.returnValue = paperSize(); });
+
 async function renderPDF(html, print) {
   // The book reaches the PDF printer as a file, not as a data: URL. A URL
   // stops at 2 MB, and a long novel is bigger than that once it's encoded; a
@@ -800,10 +926,8 @@ async function renderPDF(html, print) {
   const tmp = path.join(app.getPath('temp'), `neo-print-${process.pid}-${Date.now()}.html`);
   fs.writeFileSync(tmp, html, 'utf8');
   const pdfWin = new BrowserWindow({ show: false, webPreferences: { sandbox: true } });
-  // Letter is a North American habit; most of the world prints A4.
-  const letterCountries = ['US', 'CA', 'MX', 'PH'];
   const options = print === 'screenplay' ? SCREENPLAY_PRINT : {
-    pageSize: letterCountries.includes(app.getLocaleCountryCode()) ? 'Letter' : 'A4',
+    pageSize: paperSize(),
     margins: { top: 1, bottom: 1, left: 1, right: 1 },
     printBackground: false,
     // chapter headings become the PDF's bookmarks, for jumping around in
@@ -971,9 +1095,16 @@ ipcMain.handle('email:draft', async (_e, { to, subject, body, html, defaultName,
 // Import: .docx / .txt / .md → chapters
 // ---------------------------------------------------------------------------
 
+// numeric references too, and &amp; last, so a literal "&lt;" in the text
+// stays "&lt;" instead of turning into "<"
 const decodeEntities = (s) => s
-  .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
-  .replace(/&quot;/g, '"').replace(/&apos;/g, "'");
+  .replace(/&#x([0-9a-f]+);/gi, (m, h) => { try { return String.fromCodePoint(parseInt(h, 16)); } catch { return m; } })
+  .replace(/&#(\d+);/g, (m, d) => { try { return String.fromCodePoint(parseInt(d, 10)); } catch { return m; } })
+  .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+  .replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, '&');
+// a document's own * _ and \ are text, not emphasis: they travel escaped,
+// the way Markdown writes them, and the window turns them back into letters
+const escapeMarks = (s) => s.replace(/[\\*_]/g, '\\$&');
 
 // Is a formatting tag (<w:b>, <w:i>) present, and is it on? Returns true,
 // false (present but switched off — Word writes <w:i w:val="0"/> to cancel
@@ -998,7 +1129,10 @@ function docxStyleFormats(stylesXml) {
     const basedOn = (body.match(/<w:basedOn\s+w:val="([^"]+)"/) || [])[1];
     // only the style's own run properties, not the paragraph-mark ones
     const rpr = (body.match(/<w:rPr>[\s\S]*?<\/w:rPr>/) || [''])[0];
-    raw[m[1]] = { basedOn, bold: docxFormatOn(rpr, 'w:b'), italic: docxFormatOn(rpr, 'w:i') };
+    // the style's name: always English in the file ("heading 1", "Title"),
+    // while its id follows Word's language ("berschrift1", "Titre1")
+    const name = (body.match(/<w:name\s+w:val="([^"]*)"/) || [])[1] || '';
+    raw[m[1]] = { basedOn, name, bold: docxFormatOn(rpr, 'w:b'), italic: docxFormatOn(rpr, 'w:i') };
   }
   const resolve = (id, depth) => {
     if (out[id]) return out[id];
@@ -1006,6 +1140,7 @@ function docxStyleFormats(stylesXml) {
     if (!st || depth > 8) return { bold: false, italic: false };
     const base = st.basedOn ? resolve(st.basedOn, depth + 1) : { bold: false, italic: false };
     out[id] = {
+      name: st.name,
       bold: st.bold === undefined ? base.bold : st.bold,
       italic: st.italic === undefined ? base.italic : st.italic
     };
@@ -1023,18 +1158,28 @@ function docxParagraphToMarkdown(p, styles = {}) {
   // gives it its title — regardless of locale, the underlying style id is
   // always "Heading*".
   const pStyle = (p.match(/<w:pStyle\s+w:val="([^"]*)"/) || [])[1] || '';
-  const heading = /^heading\s*\d*$/i.test(pStyle);
+  const sName = (styles[pStyle] && styles[pStyle].name) || '';
+  const heading = /^heading\s*\d*$/i.test(pStyle) || /^heading\s*\d*$/i.test(sName);
   // Google Docs exports each of a document's tabs under a "Title"-styled
   // line, and the book's own title page uses the same style: the first one
   // names the book, later ones start chapters (see chapterize)
-  const title = /^title$/i.test(pStyle);
+  const title = /^title$/i.test(pStyle) || /^title$/i.test(sName);
   // what the paragraph's style says, before any run has its say
   const pBase = styles[pStyle] || { bold: false, italic: false };
   const runs = [...p.matchAll(/<w:r[ >][\s\S]*?<\/w:r>/g)].map((rm) => {
     const r = rm[0];
     const rpr = (r.match(/<w:rPr>[\s\S]*?<\/w:rPr>/) || [''])[0];
-    const text = [...r.matchAll(/<w:t(?:\s[^>]*)?>([\s\S]*?)<\/w:t>/g)]
-      .map((t) => decodeEntities(t[1])).join('');
+    // the run's text in order: its words, and the tabs, line breaks and
+    // no-break hyphens between them (only <w:t> used to count, which ran
+    // "red,⏎violets" together into "red,violets")
+    const text = [...r.matchAll(/<w:t(?:\s[^>]*)?>([\s\S]*?)<\/w:t>|<w:tab\/>|<w:br(\s[^>]*)?\/>|<w:cr\/>|<w:noBreakHyphen\/>/g)]
+      .map((t) => {
+        if (t[1] !== undefined) return escapeMarks(decodeEntities(t[1]));
+        if (t[0].startsWith('<w:tab')) return ' ';
+        if (t[0].startsWith('<w:noBreakHyphen')) return '\u2011';
+        if (/w:type="(page|column)"/.test(t[0])) return '';
+        return '\n';
+      }).join('');
     const rStyle = (rpr.match(/<w:rStyle\s+w:val="([^"]*)"/) || [])[1];
     const rBase = rStyle && styles[rStyle] ? styles[rStyle] : pBase;
     const b = docxFormatOn(rpr, 'w:b');
@@ -1048,12 +1193,20 @@ function docxParagraphToMarkdown(p, styles = {}) {
     if (last && last.bold === run.bold && last.italic === run.italic) last.text += run.text;
     else merged.push({ ...run });
   }
-  const text = merged.map((run) => {
-    let t = run.text;
+  // markers hug the words: "** bold **" isn't emphasis to a reader of
+  // Markdown, and a run with no words (a tab, a break) gets none at all
+  // (each line of a run on its own: the paragraph is cut at its line
+  // breaks later, and an italic poem keeps its italics on every line)
+  const wrap = (run, piece) => {
+    const m = piece.match(/^(\s*)([\s\S]*?)(\s*)$/);
+    let t = m[2];
+    if (!t) return piece;
     if (run.bold) t = '**' + t + '**';
     if (run.italic) t = '*' + t + '*';
-    return t;
-  }).join('').trim();
+    return m[1] + t + m[3];
+  };
+  const text = merged.map((run) => run.text.split('\n').map((piece) => wrap(run, piece)).join('\n'))
+    .join('').replace(/[ \t]*\n[ \t]*/g, '\n').trim();
   return { text, pageBreak, heading, title };
 }
 
@@ -1072,12 +1225,33 @@ const CHAPTER_WORDS = new RegExp('^(' + [
   'глава', 'пролог', 'эпилог', 'часть',                            // ru
   'κεφάλαιο', 'κεφαλαιο', 'πρόλογος', 'προλογος',
   'επίλογος', 'επιλογος', 'μέρος', 'μερος',
-  'ραψωδία', 'ραψωδια'                                              // el
+  'ραψωδία', 'ραψωδια',                                             // el
+  // hu: the number comes first ("3. fejezet", "II. rész")
+  'prológus', 'prologus', 'epilógus', 'epilogus',
+  '(?:\\d{1,3}|[ivxlc]{1,7})\\.\\s*(?:fejezet|rész|resz)'
 ].join('|') + ')(?![\\p{L}\\d])', 'iu');
 
 // A manuscript's own Prologue / Epilogue headings give those chapters their role
-const PROLOGUE_WORDS = /^(prologue|prólogo|prologo|prolog|proloog)(?![\p{L}\d])/iu;
-const EPILOGUE_WORDS = /^(epilogue|épilogue|epílogo|epilogo|epilog|epiloog)(?![\p{L}\d])/iu;
+const PROLOGUE_WORDS = /^(prologue|prólogo|prologo|prolog|proloog|prológus|prologus)(?![\p{L}\d])/iu;
+const EPILOGUE_WORDS = /^(epilogue|épilogue|epílogo|epilogo|epilog|epiloog|epilógus|epilogus)(?![\p{L}\d])/iu;
+
+// A text file in whatever it was saved as: UTF-8 (with or without its
+// mark), UTF-16 (Notepad's "Unicode"), or, when it isn't valid UTF-8, the
+// Windows code page Word's plain-text export uses
+function readTextFile(fp) {
+  const buf = fs.readFileSync(fp);
+  const { TextDecoder } = require('util');
+  if (buf[0] === 0xFF && buf[1] === 0xFE) return new TextDecoder('utf-16le').decode(buf.subarray(2));
+  if (buf[0] === 0xFE && buf[1] === 0xFF) return new TextDecoder('utf-16be').decode(buf.subarray(2));
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(buf).replace(/^\uFEFF/, '');
+  } catch {
+    // Latin-1 plus the code page's own 0x80–0x9F (curly quotes, dashes, €)
+    const cp = '\u20AC\uFFFD\u201A\u0192\u201E\u2026\u2020\u2021\u02C6\u2030\u0160\u2039\u0152\uFFFD\u017D\uFFFD' +
+      '\uFFFD\u2018\u2019\u201C\u201D\u2022\u2013\u2014\u02DC\u2122\u0161\u203A\u0153\uFFFD\u017E\u0178';
+    return buf.toString('latin1').replace(/[\u0080-\u009F]/g, (c) => cp[c.charCodeAt(0) - 0x80]);
+  }
+}
 
 async function importFile(fp) {
   const name = path.basename(fp).replace(/\.[^.]+$/, '');
@@ -1098,11 +1272,24 @@ async function importFile(fp) {
     const stylesFile = zip.file('word/styles.xml');
     const styles = docxStyleFormats(stylesFile ? await stylesFile.async('string') : '');
     paras = [...xml.matchAll(/<w:p[ >][\s\S]*?<\/w:p>/g)]
-      .map((m) => docxParagraphToMarkdown(m[0], styles));
+      .map((m) => docxParagraphToMarkdown(m[0], styles))
+      // a line break inside a Word paragraph (a poem, an address) becomes
+      // a paragraph of its own: NEO's lines are paragraphs
+      .flatMap((p) => !p.text.includes('\n') ? [p]
+        : p.text.split('\n').map((text, i) => ({ ...p, text: text.trim(), pageBreak: p.pageBreak && i === 0, heading: p.heading && i === 0, title: p.title && i === 0 })));
   } else {
-    const raw = fs.readFileSync(fp, 'utf8');
-    paras = raw.split(/\r?\n\s*\r?\n/)
-      .map((b) => ({ text: b.replace(/\s*\r?\n\s*/g, ' ').trim(), pageBreak: false }))
+    const raw = readTextFile(fp);
+    // Paragraphs are split on blank lines, unless the file barely has any
+    // and puts each paragraph on a line of its own (Word's "Plain Text",
+    // Notepad, Scrivener): then every line is a paragraph
+    const lines = raw.split(/\r\n|\r|\n/);
+    const blanks = lines.filter((l) => !l.trim()).length;
+    const filled = lines.length - blanks;
+    // (a file hard-wrapped at ~70 columns, Project Gutenberg style, has a
+    // blank line between paragraphs: it keeps the blank-line rule)
+    const perLine = ext === '.txt' && filled > 3 && blanks <= Math.max(1, filled / 20);
+    paras = (perLine ? lines : raw.split(/(?:\r\n|\r|\n)\s*(?:\r\n|\r|\n)/))
+      .map((b) => ({ text: (perLine ? b : b.replace(/\s*(?:\r\n|\r|\n)\s*/g, ' ')).trim(), pageBreak: false }))
       .filter((p) => p.text);
   }
 
@@ -1113,7 +1300,9 @@ async function importFile(fp) {
   const isNumeralish = (t) => /^\d{1,3}\.?$/.test(t) || /^[IVXLC]{1,7}\.?$/.test(t) || SPELLED.test(t);
   // Bare numbers only count as chapter markers when there's a ladder of them —
   // a story that merely OPENS with "Seven." keeps its seven.
-  const numeralMode = paras.filter((p) => p.text && isNumeralish(p.text.trim())).length >= 2;
+  // a heading set in bold ("**Chapter 1**") is still a heading
+  const bare = (t) => String(t || '').replace(/\*\*([^*]+)\*\*/g, '$1').replace(/\*([^*]+)\*/g, '$1').replace(/\\([\\*_])/g, '$1').trim();
+  const numeralMode = paras.filter((p) => p.text && isNumeralish(bare(p.text))).length >= 2;
   // A markdown heading: one or more "#" then text — any "size" (depth) counts.
   const isMdHeading = (t) => /^#{1,6}\s+\S/.test(t);
   const mdTitleOf = (t) => t.replace(/^#{1,6}\s*/, '').trim();
@@ -1126,12 +1315,12 @@ async function importFile(fp) {
     (CHAPTER_WORDS.test(t) && t.length < 60 && !readsAsSentence(t)) ||
     (numeralMode && isNumeralish(t))
   );
-  const isHeading = (t) => t && (isMdHeading(t) || isNumberedHeading(t));
+  const isHeading = (t) => t && (isMdHeading(t) || isNumberedHeading(bare(t)));
   // The chapter title that a heading contributes. Markdown hashes and any
   // emphasis markers are stripped, and pure numbering yields no title.
   const titleOf = (t) => {
     if (isMdHeading(t)) t = mdTitleOf(t);
-    t = t.replace(/\*\*([^*]+)\*\*/g, '$1').replace(/\*([^*]+)\*/g, '$1').replace(/_([^_]+)_/g, '$1');
+    t = bare(t).replace(/(^|[^\p{L}\p{N}_])_([^_]+)_(?![\p{L}\p{N}_])/gu, '$1$2');
     return isNumberedHeading(t) ? '' : t;
   };
   const isBreak = (t) => /^\s*([*#•~⁂—–-]\s*){1,7}$/.test(t || '');
@@ -1225,12 +1414,12 @@ async function importFile(fp) {
       (t0 === t0.toUpperCase() && /\p{Lu}.*\p{Lu}/u.test(t0) && t0.length < 60)
     );
     if (titleish) {
-      title = t0;
+      title = bare(t0);
       first.paras.shift();
     }
     const bl = first.paras.length ? bylineOf((first.paras[0].text || '').trim()) : null;
     if (bl) {
-      author = bl.trim();
+      author = bare(bl);
       first.paras.shift();
     }
     if (!first.paras.length) chapters.shift();
@@ -1241,6 +1430,7 @@ async function importFile(fp) {
   chapters.forEach((ch, i) => {
     if ((ch.role === 'prologue' && i !== 0) || (ch.role === 'epilogue' && i !== chapters.length - 1) || chapters.length < 2) ch.role = null;
   });
+  if (styledTitle && title === styledTitle) title = bare(title);
   return { name, title, author, chapters };
 }
 
@@ -1302,6 +1492,7 @@ ipcMain.handle('log:error', (_e, msg) => logError('renderer', msg));
 
 // One zip of the whole library per day, keeping the last 14. Cheap insurance.
 async function dailyBackup() {
+  if (backupRunning) return; // one at a time (the hourly look can meet a slow one)
   try {
     ensureLibrary();
     const backupsDir = path.join(LIBRARY_DIR, 'Backups');
@@ -1309,6 +1500,7 @@ async function dailyBackup() {
     const today = new Date().toISOString().slice(0, 10);
     const target = path.join(backupsDir, `neo-backup-${today}.zip`);
     if (fs.existsSync(target)) return;
+    backupRunning = true;
 
     const JSZip = require('jszip');
     const zip = new JSZip();
@@ -1322,6 +1514,9 @@ async function dailyBackup() {
       try { names = fs.readdirSync(dir); } catch (err) { missed.push(`${rel || '.'} (${err.code || err.message})`); return; }
       for (const name of names) {
         if (rel === '' && skip.has(name)) continue;
+        // only NEO's own things: a library kept in a busy folder (Dropbox,
+        // Documents) doesn't zip everything else in there every day
+        if (rel === '' && !(name.startsWith('book-') || name.startsWith('library.json') || name === '_catalog.txt')) continue;
         if (name === '.DS_Store' || /^\..+\.icloud$/.test(name)) continue; // Finder litter; iCloud's stand-in for a file not downloaded
         const full = path.join(dir, name);
         const relPath = rel ? rel + '/' + name : name;
@@ -1339,15 +1534,23 @@ async function dailyBackup() {
       zip.file('_left-out-of-this-backup.txt', missed.join('\n') + '\n');
       logError('backup', new Error('left out of today\'s backup: ' + missed.join(', ')));
     }
-    fs.writeFileSync(target, await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' }));
+    // written beside its real name and swapped in whole, so a backup cut
+    // short never stands in for the day's backup
+    const data = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+    await JSZip.loadAsync(data); // reads back whole, or it doesn't count
+    writeFileDurable(target, data);
 
     // prune old backups
-    const backups = fs.readdirSync(backupsDir).filter((f) => f.startsWith('neo-backup-')).sort();
+    const backups = fs.readdirSync(backupsDir).filter((f) => /^neo-backup-.*\.zip$/.test(f)).sort();
     while (backups.length > 14) fs.unlinkSync(path.join(backupsDir, backups.shift()));
   } catch (err) {
     logError('backup', err);
+    try { fs.unlinkSync(path.join(LIBRARY_DIR, 'Backups', `neo-backup-${new Date().toISOString().slice(0, 10)}.zip.tmp`)); } catch { /* none */ }
+  } finally {
+    backupRunning = false;
   }
 }
+let backupRunning = false;
 
 // ---------------------------------------------------------------------------
 // Window
@@ -1415,11 +1618,15 @@ function createWindow() {
   win.on('leave-full-screen', () => fullScreenChanged(false));
   win.webContents.on('did-finish-load', () => { if (win.isFullScreen()) fullScreenChanged(true); });
   const remember = () => {
+    clearTimeout(rememberTimer);
     if (win.isDestroyed() || win.isFullScreen() || win.isMinimized()) return;
-    writeSettings({ ...readSettings(), window: win.getNormalBounds() });
+    try { writeSettings({ ...readSettings(), window: win.getNormalBounds() }); } catch (err) { logError('settings', err); }
   };
-  win.on('resize', remember);
-  win.on('move', remember);
+  // a drag sends dozens of these a second: the place is written once it settles
+  let rememberTimer = null;
+  const rememberSoon = () => { clearTimeout(rememberTimer); rememberTimer = setTimeout(remember, 500); };
+  win.on('resize', rememberSoon);
+  win.on('move', rememberSoon);
   win.on('close', remember);
 
   // Right-click on text: Cut, Copy, Paste, Select All — and nothing else.
@@ -1432,6 +1639,12 @@ function createWindow() {
     if (!params.isEditable && !params.selectionText) return;
     const can = params.editFlags || {};
     const items = [];
+    // a line of a script: a page can start there
+    const line = scriptContext;
+    scriptContext = null;
+    if (params.isEditable && line) {
+      items.push({ label: line.pageBreak ? t('Remove Page Break') : t('Page Break Here'), click: () => sendToWindow({ type: 'scriptPageBreak' }) }, { type: 'separator' });
+    }
     if (params.isEditable) items.push({ role: 'cut', label: t('Cut'), enabled: !!can.canCut });
     items.push({ role: 'copy', label: t('Copy'), enabled: !!can.canCopy });
     if (params.isEditable) items.push({ role: 'paste', label: t('Paste'), enabled: !!can.canPaste });
@@ -1465,6 +1678,7 @@ const SPELL_LANGUAGES = {
   'pl': { label: 'Polski', pkg: 'dictionary-pl' },
   'pt-BR': { label: 'Português (Brasil)', pkg: 'dictionary-pt' },
   'ro': { label: 'Română', pkg: 'dictionary-ro' },
+  'hu': { label: 'Magyar', pkg: 'dictionary-hu' },
   'ru': { label: 'Русский', pkg: 'dictionary-ru' },
   'el': { label: 'Ελληνικά', pkg: 'dictionary-el' }
 };
@@ -1475,8 +1689,18 @@ let spellChild = null;
 let spellSeq = 0;
 const spellWaiting = new Map();
 
+let spellLoaded = null; // the language the running helper has loaded
 function spellRequest(msg) {
   return new Promise((resolve) => {
+    // the helper went away (it crashed, the system reclaimed it): start a
+    // new one and load the dictionary again, rather than calling every
+    // word right for the rest of the session
+    if (!spellChild && msg.type !== 'load' && spellLoaded) {
+      const lang = spellLoaded;
+      spellLoaded = null;
+      loadSpellDictionary(lang).then(() => spellRequest(msg)).then(resolve, () => resolve({ ok: false, error: 'no spell process' }));
+      return;
+    }
     if (!spellChild) { resolve({ ok: false, error: 'no spell process' }); return; }
     const id = ++spellSeq;
     spellWaiting.set(id, resolve);
@@ -1515,6 +1739,7 @@ async function loadSpellDictionary(code) {
   const res = await spellRequest({ type: 'load', language: known, dir: path.join(__dirname, 'node_modules', entry.pkg), custom });
   if (!res.ok) { logError('spell', new Error(res.error || 'dictionary failed to load')); return false; }
   spellLanguage = known;
+  spellLoaded = known;
   return true;
 }
 
@@ -1583,12 +1808,19 @@ let poetryState = false;
 let flushState = false;
 // A script open in the window: the Format menu offers its elements (the
 // keys are the editor's own, ⌘1–⌘7), and Export its two ways out
-let scriptState = { on: false, element: null };
+let scriptState = { on: false, element: null, underline: false, contd: true };
 const SCRIPT_ELEMENTS = ['heading', 'action', 'character', 'paren', 'dialogue', 'transition', 'shot'];
+// the script line a right-click is on: { pageBreak } (whether it starts a
+// page already), or null when the click wasn't on one
+let scriptContext = null;
+ipcMain.on('script:context', (e, st) => {
+  scriptContext = st && typeof st === 'object' ? { pageBreak: !!st.pageBreak } : null;
+  e.returnValue = true;
+});
 ipcMain.on('script:state', (_e, st) => {
   st = st || {};
-  const next = { on: !!st.on, element: SCRIPT_ELEMENTS.includes(st.element) ? st.element : null };
-  if (next.on === scriptState.on && next.element === scriptState.element) return;
+  const next = { on: !!st.on, element: SCRIPT_ELEMENTS.includes(st.element) ? st.element : null, underline: !!st.underline, contd: st.contd !== false };
+  if (next.on === scriptState.on && next.element === scriptState.element && next.underline === scriptState.underline && next.contd === scriptState.contd) return;
   scriptState = next;
   try { buildMenu(); } catch (err) { logError('menu', err); }
 });
@@ -1762,6 +1994,11 @@ function buildMenu() {
         {
           label: t('Spellcheck Pass'),
           accelerator: 'CmdOrCtrl+;',
+          // shown, not registered: the window answers the ; character itself
+          // (isSpellcheckShortcut). Windows matches an accelerator by key
+          // position, so on some layouts this one and ⌘/ landed on the same
+          // key and one press did both (#282).
+          registerAccelerator: false,
           click: () => sendToWindow({ type: 'spellcheck' })
         },
         {
@@ -1782,6 +2019,17 @@ function buildMenu() {
           visible: !scriptState.on, // a script is set in Courier Prime
           label: t('Body Font'),
           submenu: [
+            // A font the writer picked from their own computer is not in the list, and a radio
+            // group with nothing checked shows the first built-in as chosen. Show the font in use
+            // (#295).
+            ...(viewState.bodyFont && !bodyFonts.includes(viewState.bodyFont)
+              ? [{
+                  label: viewState.bodyFont,
+                  type: 'radio',
+                  checked: true,
+                  click: () => sendToWindow({ type: 'bodyFont', value: viewState.bodyFont })
+                }]
+              : []),
             ...bodyFonts.map((f) => ({
               label: f,
               type: 'radio',
@@ -1839,6 +2087,12 @@ function buildMenu() {
           checked: scriptState.element === value,
           click: () => sendToWindow({ type: 'scriptElement', value })
         })) : []),
+        // the script's own style, kept with that script
+        ...(scriptState.on ? [
+          { type: 'separator' },
+          { label: t('Underline Scene Headings'), type: 'checkbox', checked: scriptState.underline, click: () => sendToWindow({ type: 'scriptStyle', value: 'underline' }) },
+          { label: t('(CONT\'D) for a Returning Speaker'), type: 'checkbox', checked: scriptState.contd, click: () => sendToWindow({ type: 'scriptStyle', value: 'contd' }) }
+        ] : []),
         {
           visible: !scriptState.on,
           label: t('Flush Paragraph') + '\t' + (isMac ? '⇧Enter' : 'Shift+Enter'),
@@ -1870,6 +2124,7 @@ function buildMenu() {
         {
           label: t('Keyboard Shortcuts…'),
           accelerator: 'CmdOrCtrl+/',
+          registerAccelerator: false, // the window answers / and ? itself (isHelpShortcut)
           click: () => sendToWindow({ type: 'help' })
         },
         { type: 'separator' },
@@ -2310,7 +2565,7 @@ app.whenReady().then(() => {
       LIBRARY_DIR = path.join(app.getPath('documents'), 'NEO Library');
       // …unless the writer chose their own folder (File → Library Folder…)
       const chosen = readSettings().libraryDir;
-      if (chosen && fs.existsSync(chosen) && fs.statSync(chosen).isDirectory()) LIBRARY_DIR = chosen;
+      if (chosen) LIBRARY_DIR = awaitChosenLibrary(chosen);
       LIBRARY_FILE = path.join(LIBRARY_DIR, 'library.json');
     } catch (err) {
       logError('paths', err);
@@ -2345,6 +2600,9 @@ app.whenReady().then(() => {
     try { initSpell(); } catch (err) { logError('spell', err); }
     try { buildMenu(); } catch (err) { logError('menu', err); }
     try { dailyBackup(); } catch (err) { logError('backup', err); }
+    // NEO left open for days still makes each day's backup (and retries one
+    // that failed); an existing day's zip makes this a no-op
+    setInterval(() => { dailyBackup().catch(() => {}); }, 60 * 60 * 1000).unref?.();
     try { checkForUpdates(); } catch (err) { logError('updater', err); }
   } catch (err) {
     // catastrophic: tell the human instead of dying in silence

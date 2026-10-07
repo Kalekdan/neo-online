@@ -66,10 +66,23 @@
     return r.data;
   }
 
+  // The desktop's rule on the phone too: the new text is written beside the
+  // old file and swapped in whole, so a save cut short (the app killed in
+  // the background, the battery gone) leaves the old version, never half
+  // of the new one. A system that won't do the swap gets a plain write.
   async function writeText(path, data) {
     await ready;
+    const tmp = path + '.tmp';
     try {
+      await FS().writeFile({ ...at(tmp), data, encoding: 'utf8', recursive: true });
+      try {
+        const from = at(tmp);
+        const to = at(path);
+        await FS().rename({ from: from.path, to: to.path, directory: from.directory, toDirectory: to.directory });
+        return;
+      } catch { /* no swap here: the plain write below */ }
       await FS().writeFile({ ...at(path), data, encoding: 'utf8', recursive: true });
+      try { await FS().deleteFile(at(tmp)); } catch { /* fine */ }
     } catch (err) {
       showErrorDetail('Could not save ' + path + ': ' + (err && err.message || err));
       throw err;
@@ -110,12 +123,44 @@
     } catch { /* never let the reporter itself hiccup */ }
   }
 
+  // JSON reads fall back on the copies a write leaves, as on the desktop:
+  // the .tmp a write was making when it stopped, then .bak, the last
+  // version that read whole. What they recover is put back as the file.
   async function readJSONFile(path, fallback) {
-    try { return JSON.parse(await readText(path)); } catch { return fallback; }
+    try { return JSON.parse(await readText(path)); } catch { /* the spares, below */ }
+    for (const spare of [path + '.tmp', path + '.bak']) {
+      let v;
+      try { v = JSON.parse(await readText(spare)); } catch { continue; }
+      try { await writeText(path, JSON.stringify(v, null, 2)); } catch { /* still recovered for now */ }
+      return v;
+    }
+    return fallback;
   }
 
   async function writeJSONFile(path, data) {
+    // the version on disk, while it reads whole, becomes the .bak
+    try {
+      const old = await readText(path);
+      JSON.parse(old);
+      await FS().writeFile({ ...at(path + '.bak'), data: old, encoding: 'utf8', recursive: true });
+    } catch { /* no whole old copy to keep: the write still goes ahead */ }
     await writeText(path, JSON.stringify(data, null, 2));
+  }
+
+  // the same rule as main.js chapterDiverged: the disk copy differs from
+  // what this device last knew, holds words, and has a word the new text lacks
+  function chapterDiverged(cur, expected, html) {
+    if (cur === expected || cur === html) return false;
+    const bag = (h) => {
+      const m = new Map();
+      for (const w of String(h || '').replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').split(/\s+/)) if (w) m.set(w, (m.get(w) || 0) + 1);
+      return m;
+    };
+    const there = bag(cur);
+    if (!there.size) return false;
+    const here = bag(html);
+    for (const [w, n] of there) if (n > (here.get(w) || 0)) return true;
+    return false;
   }
 
   const bookDir = (bookId) => p(bookId);
@@ -145,7 +190,12 @@
     return (s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
   }
 
+  // Letter in the Americas and the Philippines, A4 elsewhere (as main.js)
+  const LETTER = ['US', 'CA', 'MX', 'PH', 'CL', 'CO', 'VE', 'GT', 'CR', 'PA', 'DO', 'PR', 'SV', 'HN', 'NI', 'BZ'];
+  const region = (() => { try { return new Intl.Locale(navigator.language).maximize().region || ''; } catch { return ''; } })();
+
   window.neo = {
+    paper: LETTER.includes(region) ? 'Letter' : 'A4',
     /* ---------- library ---------- */
     readLibrary: async () => {
       if (!(await checkAccess())) return { authorName: '', penNames: [], firstRunDone: false, shelves: [{ id: 'shelf-1', name: 'Works in Progress', bookIds: [] }] };
@@ -209,11 +259,18 @@
       await writeJSONFile(p(id, 'stickies.json'), []);
       return book;
     },
-    // the folder goes; on iOS the Files app keeps it in Recently Deleted
+    // the folder moves to "Deleted Books" inside the library, where it can
+    // be found and moved back (Files on iOS, any file manager on Android);
+    // nothing is erased
     deleteBook: async (bookId) => {
       try {
         await ready;
-        await FS().rmdir({ ...at(bookId), recursive: true });
+        await ensureDir('Deleted Books');
+        let dest = p('Deleted Books', bookId);
+        try { await FS().stat(at(dest)); dest += '-' + Date.now().toString(36); } catch { /* free */ }
+        const from = at(bookId);
+        const to = at(dest);
+        await FS().rename({ from: from.path, to: to.path, directory: from.directory, toDirectory: to.directory });
         return true;
       } catch (err) {
         showErrorDetail('Could not delete ' + bookId + ': ' + (err && err.message || err));
@@ -239,11 +296,19 @@
     },
     readChapter: async (bookId, chId) => {
       await fetchCloud(p(bookId, 'chapters', chId + '.html'));
-      try { return await readText(p(bookId, 'chapters', chId + '.html')); } catch { return ''; }
+      // (a swap the system cut short leaves only the .tmp: the words are there)
+      try { return await readText(p(bookId, 'chapters', chId + '.html')); } catch { /* the spare, below */ }
+      try { return await readText(p(bookId, 'chapters', chId + '.html.tmp')); } catch { return ''; }
     },
-    writeChapter: async (bookId, chId, html) => {
+    writeChapter: async (bookId, chId, html, expected) => {
       await ensureDir(bookDir(bookId) + '/chapters');
-      await writeText(p(bookId, 'chapters', chId + '.html'), html);
+      const file = p(bookId, 'chapters', chId + '.html');
+      if (typeof expected === 'string') {
+        let cur = null;
+        try { cur = await readText(file); } catch { /* not there */ }
+        if (cur !== null && chapterDiverged(cur, expected, html)) return { conflict: cur };
+      }
+      await writeText(file, html);
       return true;
     },
     deleteChapter: async (bookId, chId) => {
@@ -253,7 +318,8 @@
 
     /* ---------- notes / outline / json sidecars ---------- */
     readAux: async (bookId, name) => {
-      try { return await readText(p(bookId, name + '.html')); } catch { return ''; }
+      try { return await readText(p(bookId, name + '.html')); } catch { /* the spare, below */ }
+      try { return await readText(p(bookId, name + '.html.tmp')); } catch { return ''; }
     },
     writeAux: async (bookId, name, html) => { await writeText(p(bookId, name + '.html'), html); return true; },
     readJSON: (bookId, name, fallback) => readJSONFile(p(bookId, name + '.json'), fallback),

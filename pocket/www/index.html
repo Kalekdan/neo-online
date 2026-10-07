@@ -10,6 +10,7 @@
   <link rel="stylesheet" href="pocket.css" />
 </head>
 <body>
+  <nav id="web-menubar" hidden></nav>
   <!-- ======================= BOOKSHELF ======================= -->
   <div id="bookshelf-view">
     <header id="shelf-header">
@@ -59,6 +60,7 @@
         <div id="fr-bodyfonts" class="fr-fontrow"></div>
         <p style="margin-bottom:6px">Drop cap</p>
         <div id="fr-dropcaps" class="fr-fontrow"></div>
+        <p id="fr-error" role="alert" hidden></p>
         <div style="text-align:right;margin-top:20px">
           <button id="fr-done" class="btn-gold">Start writing</button>
         </div>
@@ -68,6 +70,7 @@
 
   <!-- ======================= EDITOR ======================= -->
   <div id="editor-view" hidden>
+    <div id="book-lock-warning" hidden></div>
 
 
     <!-- Left hover zone: chapter navigation -->

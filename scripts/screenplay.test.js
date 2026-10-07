@@ -123,8 +123,20 @@ test('Fountain in: a pasted script comes back as its elements', () => {
   assert.deepEqual(plain(sp.spFromFountain(src)), [
     L('heading', 'EXT. MARINA - NIGHT'), L('action', 'Fog. A bell rings.'), L('character', 'KIM'), L('paren', '(quietly)'),
     L('dialogue', 'Three nights.'), L('character', 'VERNON'), L('dialogue', 'Four.'), L('transition', 'CUT TO:'),
-    L('heading', 'FLASHBACK'), L('action', 'LOUD NOISE'), L('character', 'McCLANE'), L('dialogue', 'Yippee.')
+    L('heading', 'FLASHBACK'), L('action', 'LOUD NOISE'), { ...L('character', 'McCLANE'), newPage: true }, L('dialogue', 'Yippee.')
   ]);
+});
+
+test('page breaks: === in Fountain, StartsNewPage in Final Draft, and a new page in the layout', () => {
+  const lines = sp.spFromFountain(['INT. A - DAY', '', 'One.', '', '===', '', 'INT. B - DAY', '', 'Two.'].join('\n'));
+  assert.equal(lines[2].newPage, true);
+  const out = sp.spToFountain(lines);
+  assert.match(out, /One\.\n\n===\n\nINT\. B - DAY/);
+  const fdx = sp.spToFdx(lines.map((l) => ({ ...l, runs: [{ text: l.text }] })));
+  assert.match(fdx, /<Paragraph Type="Scene Heading" StartsNewPage="Yes">\n\s*<Text>INT\. B - DAY/);
+  assert.equal(sp.spFromFdx(fdx).lines[2].newPage, true);
+  const pg = sp.spPaginate([{ type: 'heading', lines: 1 }, { type: 'action', lines: 1 }, { type: 'heading', lines: 1, newPage: true }, { type: 'action', lines: 1 }]);
+  assert.deepEqual(pg.at.map((a) => a.page), [1, 1, 2, 2]);
 });
 
 test('Fountain in: a block\'s lines run on into one paragraph; a PDF\'s page furniture stays out', () => {

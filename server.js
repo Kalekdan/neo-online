@@ -95,6 +95,21 @@ function listBooks() {
   return fs.readdirSync(LIBRARY_DIR).filter((n) => n.startsWith('book-')).map((n) => { const b = readJSON(path.join(LIBRARY_DIR, n, 'book.json'), null); return b && b.id ? { id: b.id, title: b.title || 'Untitled', author: b.author || '', modified: b.modified || '', kind: b.kind || '' } : null; }).filter(Boolean);
 }
 function bookPath(id, file) { return path.join(bookDir(id), file); }
+function chapterDiverged(current, expected, next) {
+  if (current === expected || current === next) return false;
+  const bag = (html) => {
+    const words = new Map();
+    for (const word of String(html || '').replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').split(/\s+/)) {
+      if (word) words.set(word, (words.get(word) || 0) + 1);
+    }
+    return words;
+  };
+  const diskWords = bag(current);
+  if (!diskWords.size) return false;
+  const nextWords = bag(next);
+  for (const [word, count] of diskWords) if (count > (nextWords.get(word) || 0)) return true;
+  return false;
+}
 function slug(title) { return String(title || '').normalize('NFD').replace(/\p{M}/gu, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 30); }
 function importText(name, raw) {
   const paragraphs = raw.split(/\r?\n\s*\r?\n/).map((text) => text.replace(/\s*\r?\n\s*/g, ' ').trim()).filter(Boolean);
@@ -114,7 +129,7 @@ function cover(bookId, filename) {
 
 async function operation(op, args, clientId) {
   ensureLibrary();
-  const [a, b, c] = args || [];
+  const [a, b, c, d] = args || [];
   switch (op) {
     case 'lockBook': return lockBook(a, clientId);
     case 'releaseBook': return releaseBook(a, clientId);
@@ -133,7 +148,18 @@ async function operation(op, args, clientId) {
     case 'deleteBook': touchBookLock(a, clientId); fs.rmSync(bookDir(a), { recursive: true, force: true }); return true;
     case 'chapterStamps': { const dir = bookPath(a, 'chapters'); const out = {}; if (!fs.existsSync(dir)) return out; for (const f of fs.readdirSync(dir)) if (f.endsWith('.html')) { const s = fs.statSync(path.join(dir, f)); out[f.slice(0, -5)] = s.mtimeMs + ':' + s.size; } return out; }
     case 'readChapter': return readFileOrEmpty(bookPath(a, path.join('chapters', safeName(b) + '.html')));
-    case 'writeChapter': touchBookLock(a, clientId); fs.mkdirSync(bookPath(a, 'chapters'), { recursive: true }); fs.writeFileSync(bookPath(a, path.join('chapters', safeName(b) + '.html')), c); return true;
+    case 'writeChapter': {
+      touchBookLock(a, clientId);
+      const file = bookPath(a, path.join('chapters', safeName(b) + '.html'));
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      if (typeof d === 'string') {
+        let current = null;
+        try { current = fs.readFileSync(file, 'utf8'); } catch { /* missing chapter */ }
+        if (current !== null && chapterDiverged(current, d, c)) return { conflict: current };
+      }
+      fs.writeFileSync(file, c);
+      return true;
+    }
     case 'deleteChapter': touchBookLock(a, clientId); fs.rmSync(bookPath(a, path.join('chapters', safeName(b) + '.html')), { force: true }); return true;
     case 'readAux': return readFileOrEmpty(bookPath(a, safeName(b) + '.html'));
     case 'writeAux': touchBookLock(a, clientId); fs.writeFileSync(bookPath(a, safeName(b) + '.html'), c); return true;
