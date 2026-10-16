@@ -14,9 +14,14 @@
   --dropcap-font: "Didot", "Bodoni 72", Georgia, serif;
   /* the page: a book page's width, which in a window wide enough to leave
      room on both sides grows a little (never past a comfortable line) */
-  --page-w: clamp(680px, 44vw, 760px);
+  --page-wf: 1;      /* Format → Page Width: Regular 1, Wide, Wider (app.js) */
+  --page-pad-x: 72px; /* the page's side margins at that width */
+  --page-w: calc(clamp(680px, 44vw, 760px) * var(--page-wf));
   /* the room the scrollbar and the page's own shadow need beside it */
   --page-gutter: 80px;
+  /* how wide everything laid out as the manuscript is: one page, or, in the
+     Pages view with two pages side by side, a spread (see "Pages view") */
+  --sheet-w: var(--page-w);
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -271,6 +276,64 @@ html.web-version #dragstrip { top: 30px; }
 /* Josefin Sans (the band cover, every author line) → Jost */
 @font-face { font-family: 'NEO Josefin'; src: url('fonts/jost-latin-700-normal.ttf') format('truetype'); font-weight: 700; unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116; size-adjust: 105.1%; ascent-override: 71.3%; descent-override: 23.8%; line-gap-override: 0.0%; }
 @font-face { font-family: 'NEO Josefin'; src: url('fonts/jost-latin-700-normal.ttf') format('truetype'); font-weight: 600; unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116; size-adjust: 104.0%; ascent-override: 72.1%; descent-override: 24.0%; line-gap-override: 0.0%; }
+
+/* Korean letters. No face above has Hangul, so each family gets a Hangul
+   companion under its own name, the way the Russian faces do: Noto Serif KR
+   for the serif faces, the drop caps and Courier Prime, Noto Sans KR for
+   the sans faces. Both are variable, so one file serves every weight; the
+   black display faces declared at 400 (Abril, Anton, Bebas) take a 900
+   instance instead. Each is scaled so Noto's own Latin capitals would stand
+   as tall as this face's, keeping the proportion Noto's designers set
+   between Hangul and Latin, and takes the Latin face's line metrics. The
+   files hold the 11,172 syllables, the jamo and CJK punctuation; hanja come
+   from the system. Hangul has no italic: the italic faces are upright. */
+@font-face { font-family: 'NEO Anton'; src: url('fonts/noto-sans-kr-hangul-900-normal.woff2') format('woff2'); font-weight: 400; unicode-range: U+1100-11FF, U+3000-303F, U+3130-318F, U+A960-A97F, U+AC00-D7A3, U+D7B0-D7FF; size-adjust: 117.2%; ascent-override: 100.3%; descent-override: 28.1%; line-gap-override: 0.0%; }
+@font-face { font-family: 'NEO Bebas'; src: url('fonts/noto-sans-kr-hangul-900-normal.woff2') format('woff2'); font-weight: 400; unicode-range: U+1100-11FF, U+3000-303F, U+3130-318F, U+A960-A97F, U+AC00-D7A3, U+D7B0-D7FF; size-adjust: 95.5%; ascent-override: 94.2%; descent-override: 31.4%; line-gap-override: 0.0%; }
+@font-face { font-family: 'NEO Oswald'; src: url('fonts/noto-sans-kr-hangul-var.woff2') format('woff2'); font-weight: 700; unicode-range: U+1100-11FF, U+3000-303F, U+3130-318F, U+A960-A97F, U+AC00-D7A3, U+D7B0-D7FF; size-adjust: 110.5%; ascent-override: 108.0%; descent-override: 26.2%; line-gap-override: 0.0%; }
+@font-face { font-family: 'NEO Abril'; src: url('fonts/noto-serif-kr-hangul-900-normal.woff2') format('woff2'); font-weight: 400; unicode-range: U+1100-11FF, U+3000-303F, U+3130-318F, U+A960-A97F, U+AC00-D7A3, U+D7B0-D7FF; size-adjust: 96.0%; ascent-override: 110.2%; descent-override: 30.3%; line-gap-override: 0.0%; }
+@font-face { font-family: 'NEO Playfair'; src: url('fonts/noto-serif-kr-hangul-var.woff2') format('woff2'); font-weight: 900; unicode-range: U+1100-11FF, U+3000-303F, U+3130-318F, U+A960-A97F, U+AC00-D7A3, U+D7B0-D7FF; size-adjust: 97.1%; ascent-override: 111.4%; descent-override: 25.8%; line-gap-override: 0.0%; }
+@font-face { font-family: 'NEO Playfair'; src: url('fonts/noto-serif-kr-hangul-var.woff2') format('woff2'); font-weight: 900; font-style: italic; unicode-range: U+1100-11FF, U+3000-303F, U+3130-318F, U+A960-A97F, U+AC00-D7A3, U+D7B0-D7FF; size-adjust: 97.1%; ascent-override: 111.4%; descent-override: 25.8%; line-gap-override: 0.0%; }
+@font-face { font-family: 'NEO Playfair'; src: url('fonts/noto-serif-kr-hangul-var.woff2') format('woff2'); font-weight: 700; unicode-range: U+1100-11FF, U+3000-303F, U+3130-318F, U+A960-A97F, U+AC00-D7A3, U+D7B0-D7FF; size-adjust: 97.1%; ascent-override: 111.4%; descent-override: 25.8%; line-gap-override: 0.0%; }
+@font-face { font-family: 'NEO Playfair'; src: url('fonts/noto-serif-kr-hangul-var.woff2') format('woff2'); font-weight: 400; font-style: italic; unicode-range: U+1100-11FF, U+3000-303F, U+3130-318F, U+A960-A97F, U+AC00-D7A3, U+D7B0-D7FF; size-adjust: 97.1%; ascent-override: 111.4%; descent-override: 25.8%; line-gap-override: 0.0%; }
+@font-face { font-family: 'NEO Cinzel'; src: url('fonts/noto-serif-kr-hangul-var.woff2') format('woff2'); font-weight: 900; unicode-range: U+1100-11FF, U+3000-303F, U+3130-318F, U+A960-A97F, U+AC00-D7A3, U+D7B0-D7FF; size-adjust: 96.0%; ascent-override: 101.6%; descent-override: 38.7%; line-gap-override: 0.0%; }
+@font-face { font-family: 'NEO Josefin'; src: url('fonts/noto-sans-kr-hangul-var.woff2') format('woff2'); font-weight: 700; unicode-range: U+1100-11FF, U+3000-303F, U+3130-318F, U+A960-A97F, U+AC00-D7A3, U+D7B0-D7FF; size-adjust: 95.8%; ascent-override: 78.3%; descent-override: 26.1%; line-gap-override: 0.0%; }
+@font-face { font-family: 'NEO Josefin'; src: url('fonts/noto-sans-kr-hangul-var.woff2') format('woff2'); font-weight: 600; unicode-range: U+1100-11FF, U+3000-303F, U+3130-318F, U+A960-A97F, U+AC00-D7A3, U+D7B0-D7FF; size-adjust: 95.8%; ascent-override: 78.3%; descent-override: 26.1%; line-gap-override: 0.0%; }
+@font-face { font-family: 'NEO Baskerville'; src: url('fonts/noto-serif-kr-hangul-var.woff2') format('woff2'); font-weight: 700; unicode-range: U+1100-11FF, U+3000-303F, U+3130-318F, U+A960-A97F, U+AC00-D7A3, U+D7B0-D7FF; size-adjust: 105.6%; ascent-override: 91.8%; descent-override: 25.6%; line-gap-override: 0.0%; }
+@font-face { font-family: 'Gelasio'; src: url('fonts/noto-serif-kr-hangul-var.woff2') format('woff2'); font-weight: 400; unicode-range: U+1100-11FF, U+3000-303F, U+3130-318F, U+A960-A97F, U+AC00-D7A3, U+D7B0-D7FF; size-adjust: 95.0%; ascent-override: 97.6%; descent-override: 36.0%; line-gap-override: 0.0%; }
+@font-face { font-family: 'Gelasio'; src: url('fonts/noto-serif-kr-hangul-var.woff2') format('woff2'); font-weight: 400; font-style: italic; unicode-range: U+1100-11FF, U+3000-303F, U+3130-318F, U+A960-A97F, U+AC00-D7A3, U+D7B0-D7FF; size-adjust: 95.0%; ascent-override: 97.6%; descent-override: 36.0%; line-gap-override: 0.0%; }
+@font-face { font-family: 'Gelasio'; src: url('fonts/noto-serif-kr-hangul-var.woff2') format('woff2'); font-weight: 700; unicode-range: U+1100-11FF, U+3000-303F, U+3130-318F, U+A960-A97F, U+AC00-D7A3, U+D7B0-D7FF; size-adjust: 95.0%; ascent-override: 97.6%; descent-override: 36.0%; line-gap-override: 0.0%; }
+@font-face { font-family: 'Gelasio'; src: url('fonts/noto-serif-kr-hangul-var.woff2') format('woff2'); font-weight: 700; font-style: italic; unicode-range: U+1100-11FF, U+3000-303F, U+3130-318F, U+A960-A97F, U+AC00-D7A3, U+D7B0-D7FF; size-adjust: 95.0%; ascent-override: 97.6%; descent-override: 36.0%; line-gap-override: 0.0%; }
+@font-face { font-family: 'TeX Gyre Pagella'; src: url('fonts/noto-serif-kr-hangul-var.woff2') format('woff2'); font-weight: 400; unicode-range: U+1100-11FF, U+3000-303F, U+3130-318F, U+A960-A97F, U+AC00-D7A3, U+D7B0-D7FF; size-adjust: 94.9%; ascent-override: 76.5%; descent-override: 29.6%; line-gap-override: 0.0%; }
+@font-face { font-family: 'TeX Gyre Pagella'; src: url('fonts/noto-serif-kr-hangul-var.woff2') format('woff2'); font-weight: 400; font-style: italic; unicode-range: U+1100-11FF, U+3000-303F, U+3130-318F, U+A960-A97F, U+AC00-D7A3, U+D7B0-D7FF; size-adjust: 94.9%; ascent-override: 77.2%; descent-override: 29.1%; line-gap-override: 0.0%; }
+@font-face { font-family: 'TeX Gyre Pagella'; src: url('fonts/noto-serif-kr-hangul-var.woff2') format('woff2'); font-weight: 700; unicode-range: U+1100-11FF, U+3000-303F, U+3130-318F, U+A960-A97F, U+AC00-D7A3, U+D7B0-D7FF; size-adjust: 93.4%; ascent-override: 77.1%; descent-override: 27.6%; line-gap-override: 0.0%; }
+@font-face { font-family: 'TeX Gyre Pagella'; src: url('fonts/noto-serif-kr-hangul-var.woff2') format('woff2'); font-weight: 700; font-style: italic; unicode-range: U+1100-11FF, U+3000-303F, U+3130-318F, U+A960-A97F, U+AC00-D7A3, U+D7B0-D7FF; size-adjust: 93.4%; ascent-override: 77.7%; descent-override: 29.0%; line-gap-override: 0.0%; }
+@font-face { font-family: 'Libre Baskerville'; src: url('fonts/noto-serif-kr-hangul-var.woff2') format('woff2'); font-weight: 400; unicode-range: U+1100-11FF, U+3000-303F, U+3130-318F, U+A960-A97F, U+AC00-D7A3, U+D7B0-D7FF; size-adjust: 105.6%; ascent-override: 91.8%; descent-override: 25.6%; line-gap-override: 0.0%; }
+@font-face { font-family: 'Libre Baskerville'; src: url('fonts/noto-serif-kr-hangul-var.woff2') format('woff2'); font-weight: 400; font-style: italic; unicode-range: U+1100-11FF, U+3000-303F, U+3130-318F, U+A960-A97F, U+AC00-D7A3, U+D7B0-D7FF; size-adjust: 105.6%; ascent-override: 91.8%; descent-override: 25.6%; line-gap-override: 0.0%; }
+@font-face { font-family: 'Libre Baskerville'; src: url('fonts/noto-serif-kr-hangul-var.woff2') format('woff2'); font-weight: 700; unicode-range: U+1100-11FF, U+3000-303F, U+3130-318F, U+A960-A97F, U+AC00-D7A3, U+D7B0-D7FF; size-adjust: 105.6%; ascent-override: 91.8%; descent-override: 25.6%; line-gap-override: 0.0%; }
+@font-face { font-family: 'Alegreya'; src: url('fonts/noto-serif-kr-hangul-var.woff2') format('woff2'); font-weight: 400; unicode-range: U+1100-11FF, U+3000-303F, U+3130-318F, U+A960-A97F, U+AC00-D7A3, U+D7B0-D7FF; size-adjust: 87.4%; ascent-override: 116.3%; descent-override: 39.5%; line-gap-override: 0.0%; }
+@font-face { font-family: 'Alegreya'; src: url('fonts/noto-serif-kr-hangul-var.woff2') format('woff2'); font-weight: 400; font-style: italic; unicode-range: U+1100-11FF, U+3000-303F, U+3130-318F, U+A960-A97F, U+AC00-D7A3, U+D7B0-D7FF; size-adjust: 87.2%; ascent-override: 116.5%; descent-override: 39.5%; line-gap-override: 0.0%; }
+@font-face { font-family: 'Alegreya'; src: url('fonts/noto-serif-kr-hangul-var.woff2') format('woff2'); font-weight: 700; unicode-range: U+1100-11FF, U+3000-303F, U+3130-318F, U+A960-A97F, U+AC00-D7A3, U+D7B0-D7FF; size-adjust: 88.1%; ascent-override: 115.4%; descent-override: 39.2%; line-gap-override: 0.0%; }
+@font-face { font-family: 'Alegreya'; src: url('fonts/noto-serif-kr-hangul-var.woff2') format('woff2'); font-weight: 700; font-style: italic; unicode-range: U+1100-11FF, U+3000-303F, U+3130-318F, U+A960-A97F, U+AC00-D7A3, U+D7B0-D7FF; size-adjust: 87.9%; ascent-override: 115.5%; descent-override: 39.2%; line-gap-override: 0.0%; }
+@font-face { font-family: 'Source Serif Pro'; src: url('fonts/noto-serif-kr-hangul-var.woff2') format('woff2'); font-weight: 400; unicode-range: U+1100-11FF, U+3000-303F, U+3130-318F, U+A960-A97F, U+AC00-D7A3, U+D7B0-D7FF; size-adjust: 91.9%; ascent-override: 112.7%; descent-override: 36.4%; line-gap-override: 0.0%; }
+@font-face { font-family: 'Source Serif Pro'; src: url('fonts/noto-serif-kr-hangul-var.woff2') format('woff2'); font-weight: 400; font-style: italic; unicode-range: U+1100-11FF, U+3000-303F, U+3130-318F, U+A960-A97F, U+AC00-D7A3, U+D7B0-D7FF; size-adjust: 91.9%; ascent-override: 112.7%; descent-override: 36.4%; line-gap-override: 0.0%; }
+@font-face { font-family: 'Source Serif Pro'; src: url('fonts/noto-serif-kr-hangul-var.woff2') format('woff2'); font-weight: 700; unicode-range: U+1100-11FF, U+3000-303F, U+3130-318F, U+A960-A97F, U+AC00-D7A3, U+D7B0-D7FF; size-adjust: 91.9%; ascent-override: 112.7%; descent-override: 36.4%; line-gap-override: 0.0%; }
+@font-face { font-family: 'Source Serif Pro'; src: url('fonts/noto-serif-kr-hangul-var.woff2') format('woff2'); font-weight: 700; font-style: italic; unicode-range: U+1100-11FF, U+3000-303F, U+3130-318F, U+A960-A97F, U+AC00-D7A3, U+D7B0-D7FF; size-adjust: 91.9%; ascent-override: 112.7%; descent-override: 36.4%; line-gap-override: 0.0%; }
+@font-face { font-family: 'Libre Bodoni'; src: url('fonts/noto-serif-kr-hangul-var.woff2') format('woff2'); font-weight: 400; unicode-range: U+1100-11FF, U+3000-303F, U+3130-318F, U+A960-A97F, U+AC00-D7A3, U+D7B0-D7FF; size-adjust: 103.4%; ascent-override: 89.3%; descent-override: 31.5%; line-gap-override: 0.0%; }
+@font-face { font-family: 'Libre Bodoni'; src: url('fonts/noto-serif-kr-hangul-var.woff2') format('woff2'); font-weight: 400; font-style: italic; unicode-range: U+1100-11FF, U+3000-303F, U+3130-318F, U+A960-A97F, U+AC00-D7A3, U+D7B0-D7FF; size-adjust: 103.4%; ascent-override: 89.3%; descent-override: 31.5%; line-gap-override: 0.0%; }
+@font-face { font-family: 'Libre Bodoni'; src: url('fonts/noto-serif-kr-hangul-var.woff2') format('woff2'); font-weight: 700; unicode-range: U+1100-11FF, U+3000-303F, U+3130-318F, U+A960-A97F, U+AC00-D7A3, U+D7B0-D7FF; size-adjust: 103.4%; ascent-override: 89.3%; descent-override: 31.5%; line-gap-override: 0.0%; }
+@font-face { font-family: 'TeX Gyre Chorus'; src: url('fonts/noto-serif-kr-hangul-var.woff2') format('woff2'); font-weight: 400; unicode-range: U+1100-11FF, U+3000-303F, U+3130-318F, U+A960-A97F, U+AC00-D7A3, U+D7B0-D7FF; size-adjust: 78.6%; ascent-override: 130.7%; descent-override: 36.6%; line-gap-override: 0.0%; }
+@font-face { font-family: 'iA Writer Quattro'; src: url('fonts/noto-sans-kr-hangul-var.woff2') format('woff2'); font-weight: 400; unicode-range: U+1100-11FF, U+3000-303F, U+3130-318F, U+A960-A97F, U+AC00-D7A3, U+D7B0-D7FF; size-adjust: 95.2%; ascent-override: 107.6%; descent-override: 28.9%; line-gap-override: 0.0%; }
+@font-face { font-family: 'iA Writer Quattro'; src: url('fonts/noto-sans-kr-hangul-var.woff2') format('woff2'); font-weight: 400; font-style: italic; unicode-range: U+1100-11FF, U+3000-303F, U+3130-318F, U+A960-A97F, U+AC00-D7A3, U+D7B0-D7FF; size-adjust: 95.2%; ascent-override: 107.6%; descent-override: 28.9%; line-gap-override: 0.0%; }
+@font-face { font-family: 'iA Writer Quattro'; src: url('fonts/noto-sans-kr-hangul-var.woff2') format('woff2'); font-weight: 700; unicode-range: U+1100-11FF, U+3000-303F, U+3130-318F, U+A960-A97F, U+AC00-D7A3, U+D7B0-D7FF; size-adjust: 95.2%; ascent-override: 107.6%; descent-override: 28.9%; line-gap-override: 0.0%; }
+@font-face { font-family: 'iA Writer Quattro'; src: url('fonts/noto-sans-kr-hangul-var.woff2') format('woff2'); font-weight: 700; font-style: italic; unicode-range: U+1100-11FF, U+3000-303F, U+3130-318F, U+A960-A97F, U+AC00-D7A3, U+D7B0-D7FF; size-adjust: 95.2%; ascent-override: 107.6%; descent-override: 28.9%; line-gap-override: 0.0%; }
+@font-face { font-family: 'Jost'; src: url('fonts/noto-sans-kr-hangul-var.woff2') format('woff2'); font-weight: 400; unicode-range: U+1100-11FF, U+3000-303F, U+3130-318F, U+A960-A97F, U+AC00-D7A3, U+D7B0-D7FF; size-adjust: 95.5%; ascent-override: 112.0%; descent-override: 39.3%; line-gap-override: 0.0%; }
+@font-face { font-family: 'Jost'; src: url('fonts/noto-sans-kr-hangul-var.woff2') format('woff2'); font-weight: 400; font-style: italic; unicode-range: U+1100-11FF, U+3000-303F, U+3130-318F, U+A960-A97F, U+AC00-D7A3, U+D7B0-D7FF; size-adjust: 95.5%; ascent-override: 112.0%; descent-override: 39.3%; line-gap-override: 0.0%; }
+@font-face { font-family: 'Jost'; src: url('fonts/noto-sans-kr-hangul-var.woff2') format('woff2'); font-weight: 700; unicode-range: U+1100-11FF, U+3000-303F, U+3130-318F, U+A960-A97F, U+AC00-D7A3, U+D7B0-D7FF; size-adjust: 95.5%; ascent-override: 112.0%; descent-override: 39.3%; line-gap-override: 0.0%; }
+@font-face { font-family: 'Jost'; src: url('fonts/noto-sans-kr-hangul-var.woff2') format('woff2'); font-weight: 700; font-style: italic; unicode-range: U+1100-11FF, U+3000-303F, U+3130-318F, U+A960-A97F, U+AC00-D7A3, U+D7B0-D7FF; size-adjust: 95.5%; ascent-override: 112.0%; descent-override: 39.3%; line-gap-override: 0.0%; }
+@font-face { font-family: 'Courier Prime'; src: url('fonts/noto-serif-kr-hangul-var.woff2') format('woff2'); font-weight: 400; unicode-range: U+1100-11FF, U+3000-303F, U+3130-318F, U+A960-A97F, U+AC00-D7A3, U+D7B0-D7FF; size-adjust: 79.5%; ascent-override: 98.3%; descent-override: 43.0%; line-gap-override: 0.0%; }
+@font-face { font-family: 'Courier Prime'; src: url('fonts/noto-serif-kr-hangul-var.woff2') format('woff2'); font-weight: 400; font-style: italic; unicode-range: U+1100-11FF, U+3000-303F, U+3130-318F, U+A960-A97F, U+AC00-D7A3, U+D7B0-D7FF; size-adjust: 79.5%; ascent-override: 98.3%; descent-override: 43.0%; line-gap-override: 0.0%; }
+@font-face { font-family: 'Courier Prime'; src: url('fonts/noto-serif-kr-hangul-var.woff2') format('woff2'); font-weight: 700; unicode-range: U+1100-11FF, U+3000-303F, U+3130-318F, U+A960-A97F, U+AC00-D7A3, U+D7B0-D7FF; size-adjust: 79.5%; ascent-override: 98.3%; descent-override: 43.0%; line-gap-override: 0.0%; }
+@font-face { font-family: 'Courier Prime'; src: url('fonts/noto-serif-kr-hangul-var.woff2') format('woff2'); font-weight: 700; font-style: italic; unicode-range: U+1100-11FF, U+3000-303F, U+3130-318F, U+A960-A97F, U+AC00-D7A3, U+D7B0-D7FF; size-adjust: 79.5%; ascent-override: 98.3%; descent-override: 43.0%; line-gap-override: 0.0%; }
 
 .book .b-text {
   position: absolute; left: 8px; right: 8px; z-index: 2;
@@ -562,6 +625,32 @@ body.night .ps-paper .ps-body.empty::before, body.night .ps-paper .tp-field:empt
 }
 .modal input:focus { outline: none; border-color: var(--accent); }
 
+/* File → Export → Paperback for KDP… */
+.print-modal { max-height: calc(100vh - 48px); overflow-y: auto; }
+.print-modal .pm-review-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.print-modal .pm-review-row .pm-edit { font-size: 12px; padding: 2px 6px; opacity: 0; transition: opacity 0.15s; }
+.print-modal .pm-review-row:hover .pm-edit, .print-modal .pm-edit:focus-visible { opacity: 1; }
+.print-modal #pm-review-text { margin: 4px 0 10px; }
+.print-modal label.pm-also { display: block; margin-top: 6px; }
+.print-modal .pm-hint { font-size: 13px; color: var(--muted); margin-bottom: 16px; }
+.print-modal h3 { font-weight: 400; font-size: 14px; color: var(--accent); margin: 8px 0 12px; }
+.print-modal .pm-row { display: flex; gap: 14px; }
+.print-modal .pm-row > label { flex: 1; min-width: 0; }
+.print-modal .pm-trims { gap: 8px; margin-bottom: 16px; }
+.print-modal .pm-trims .fr-choice { flex: 1; padding: 10px 6px; text-align: center; }
+.print-modal .pm-trims .fr-choice strong { margin-bottom: 3px; font-size: 13px; }
+.print-modal .pm-trims .fr-choice span { font-size: 11px; }
+.print-modal .fr-choice.sel { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.print-modal .fr-choice:focus:not(:focus-visible) { outline: none; }
+.print-modal select, .print-modal textarea {
+  display: block; width: 100%; margin-top: 6px; padding: 8px 10px;
+  background: var(--bg); border: 1px solid #3a3a3a; border-radius: 6px; color: #eee; font: inherit; font-size: 14px;
+}
+.print-modal textarea { resize: vertical; }
+.print-modal label.pm-check { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+.print-modal label.pm-check input { display: inline-block; width: auto; margin: 0; }
+body.light .print-modal select, body.light .print-modal textarea { background: #fff; border-color: #cfcac0; color: #1c1a17; }
+
 /* the two button voices every dialog speaks in */
 .btn-gold {
   background: var(--accent); border: none; border-radius: 6px;
@@ -651,7 +740,7 @@ body.night #aux-editor * { color: inherit; }
 #paper-scroll {
   position: absolute; top: 0; bottom: 40px;
   left: 50%; transform: translateX(-50%);
-  width: min(calc((var(--page-w) + var(--page-gutter)) * var(--page-zoom, 1)), 94%);
+  width: min(calc((var(--sheet-w) + var(--page-gutter)) * var(--page-zoom, 1)), 94%);
   overflow-y: auto;
 }
 
@@ -660,10 +749,13 @@ body.night #aux-editor * { color: inherit; }
 ::highlight(neo-search-current) { background: #c9a86a; color: #1c1c1c; }
 /* the sentence Read Aloud is on (⌘⇧U) */
 ::highlight(neo-speak) { background: rgba(201, 168, 106, 0.28); }
+/* Non-Breaking Marks (Format menu): the spaces and hyphens a wrap must not
+   break at — U+00A0, U+202F and U+2011 — in one unobtrusive light gray */
+::highlight(neo-nb-mark) { background: rgba(127, 127, 127, 0.25); }
 
 /* Each page of the book is its own sheet of paper */
 #paper {
-  width: calc(var(--page-w) * var(--page-zoom, 1)); max-width: 92%;
+  width: calc(var(--sheet-w) * var(--page-zoom, 1)); max-width: 92%;
   margin: 40px auto 120px;
 }
 /* typewriter scrolling: room below the last line so it can sit mid-screen
@@ -685,7 +777,7 @@ body.focus-mode.night .sheet ::selection { color: #d6d2c6; }
 body.focus-mode:not(.no-dropcap) .chapter-body.focus-cap:not(.cap-off):not(.no-cap):not(.opens-dialogue) p[data-first]::first-letter { color: var(--ink); }
 .sheet {
   background: var(--paper); color: var(--ink);
-  padding: 70px 72px 90px;
+  padding: 70px var(--page-pad-x) 90px;
   box-shadow: 0 4px 30px rgba(0,0,0,0.5);
   min-height: 88vh;
   margin-bottom: 44px;
@@ -694,10 +786,51 @@ body.focus-mode:not(.no-dropcap) .chapter-body.focus-cap:not(.cap-off):not(.no-c
   width: calc(var(--page-w) * var(--page-zoom, 1)); max-width: 92%;
   background: var(--paper); color: var(--ink);
   margin: 40px auto 120px;
-  padding: 70px 72px 90px;
+  padding: 70px var(--page-pad-x) 90px;
   box-shadow: 0 4px 30px rgba(0,0,0,0.5);
   min-height: 85vh;
 }
+
+/* --- Pages view (Format → Show Pages) ---
+   The chapters are shown as separate pages the shape of a sheet of paper,
+   with the gap between them a word processor draws. Nothing is added to the
+   text: #chapters becomes a stack of columns one page high (column-height,
+   column-wrap), the chapters' sheets flow through them, and
+   box-decoration-break: clone gives each piece of a sheet its own paper,
+   margins and shadow. Every chapter starts on a fresh page. app.js sets
+   --pg-n, the pages a chapter runs to, so that its last page is a whole page
+   too; Two Pages Side by Side (body.pages-two, set when two fit the window)
+   makes the stack two columns wide. A script has pages of its own. */
+body.paged {
+  --pg-ratio: 1.4142; /* page height / width: A4. US Letter is 1.2941 */
+  --pg-gap-base: 28px;
+  --pg-w: calc(var(--page-w) * var(--page-zoom, 1));
+  --pg-h: round(calc(var(--pg-w) * var(--pg-ratio)), 1px); /* whole pixels, so a chapter's pages add up exactly */
+  --pg-m: calc(var(--pg-w) * 0.12); /* the margins, about an inch */
+  --pg-gap: calc(var(--pg-gap-base) * var(--page-zoom, 1));
+}
+body.paged.pages-two { --sheet-w: calc(var(--page-w) * 2 + var(--pg-gap-base)); }
+/* a page keeps its shape: zoomed past the window it scrolls sideways */
+body.paged #paper:not(.script) { max-width: none; position: relative; }
+body.paged #paper:not(.script) #chapters {
+  column-count: 1; column-height: var(--pg-h); column-wrap: wrap; column-fill: auto;
+  column-gap: var(--pg-gap); row-gap: var(--pg-gap);
+}
+body.paged.pages-two #paper:not(.script) #chapters { column-count: 2; }
+body.paged #paper:not(.script) .chapter.sheet {
+  box-decoration-break: clone; -webkit-box-decoration-break: clone;
+  break-before: column;
+  padding: var(--pg-m);
+  margin: 0;
+  min-height: calc(var(--pg-n, 1) * var(--pg-h) - 0.5px); /* (half a pixel under, or rounding adds a page) */
+}
+body.paged #paper:not(.script) #title-page {
+  width: var(--pg-w); height: var(--pg-h); min-height: 0;
+  margin: 0 auto var(--pg-gap); padding: var(--pg-m);
+}
+/* a page zoomed out is the whole page smaller, the title page's lines too */
+body.paged #paper:not(.script) #tp-subtitle { font-size: calc(17px * var(--page-zoom, 1)); margin-top: calc(14px * var(--page-zoom, 1)); min-height: 0; }
+body.paged #paper:not(.script) #tp-author { font-size: calc(14px * var(--page-zoom, 1)); margin-top: calc(46px * var(--page-zoom, 1)); letter-spacing: calc(3px * var(--page-zoom, 1)); }
 
 /* --- Title page: a sheet of its own --- */
 #title-page {
@@ -797,7 +930,7 @@ body:not(.no-dropcap) .chapter-body:not(.cap-off):not(.no-cap):not(.opens-dialog
   padding: 6px 10px; border-radius: 5px; font-size: 14px; cursor: pointer;
   font-family: Georgia, serif;
 }
-.spell-menu button:hover:not(:disabled) { background: #333; }
+.spell-menu button:hover:not(:disabled), .spell-menu button:focus-visible { background: #333; outline: none; }
 .spell-menu button:disabled { color: #777; font-style: italic; }
 .spell-menu .sm-sep { height: 1px; background: #3a3a3a; margin: 4px 0; }
 body.bright .spell-menu { border-color: #4a4a4a; }
@@ -973,7 +1106,7 @@ body.night #outline-board { --card: #e2ddd1; --card-head: #ebe7dd; }
   font-size: calc(13px * var(--cz));
 }
 body.light .ob-card { box-shadow: 0 0 0 1px #d9d3c4, 0 3px 8px rgba(60,50,30,0.12); }
-.ob-cell:focus-visible .ob-card { box-shadow: 0 0 0 2px var(--accent), 0 5px 12px rgba(0,0,0,0.3); }
+.ob-cell:focus-visible .ob-card { box-shadow: 0 0 0 3px var(--red), 0 5px 12px rgba(0,0,0,0.3); }
 .ob-chapter { background: var(--card-head); }
 .ob-head { display: flex; align-items: baseline; gap: 7px; min-height: 0; }
 .ob-chapter .ob-head { align-items: flex-end; border-bottom: 1px solid #e3b4ae; padding-bottom: 2px; }
@@ -1150,7 +1283,7 @@ body.focus-mode .walk-note { opacity: 0.6; }
 #nav-hotzone { position: fixed; left: 0; top: 0; bottom: 40px; width: 18px; z-index: 60; }
 /* the panes wake from well inside the margins, never over the page itself */
 #nav-hotzone, #side-hotzone {
-  width: clamp(18px, calc((100vw - min((var(--page-w) + var(--page-gutter)) * var(--page-zoom, 1), 94vw)) / 2 - 24px), 96px);
+  width: clamp(18px, calc((100vw - min((var(--sheet-w) + var(--page-gutter)) * var(--page-zoom, 1), 94vw)) / 2 - 24px), 96px);
 }
 #nav-pane {
   position: fixed; left: 0; top: 0; bottom: 40px; width: 248px;
@@ -1271,7 +1404,11 @@ body.focus-mode .walk-note { opacity: 0.6; }
   padding: 0 16px 14px; font-size: 12px; text-transform: uppercase;
   letter-spacing: 2px; color: var(--muted);
 }
+/* the pin sits in the pane's top corner, above the cards, where it stays as
+   the pane scrolls: below the window's drag strip (#dragstrip, 28px), which
+   would take the click and move the window instead */
 #side-pin {
+  position: fixed; top: 32px; right: 10px; -webkit-app-region: no-drag;
   background: none; border: none; color: #555; font-size: 15px;
 }
 #side-pin.pinned { color: var(--accent); }
@@ -1385,6 +1522,10 @@ body.full-screen.focus-mode #bottombar:not(:hover):not(.attn) { opacity: 0; }
   padding: 6px 14px; color: #191919; font-size: 12px;
 }
 #stats-chart { background: #1d1d1d; border-radius: 8px; padding: 10px; margin-top: 8px; }
+/* on a phone the modal is narrower than the chart's 520px: it scales down instead of spilling out */
+@media (max-width: 600px) {
+  #stats-chart { box-sizing: border-box; max-width: 100%; height: auto; display: block; }
+}
 
 /* --- Keyboard shortcut reference --- */
 .shortcuts-modal {
@@ -1458,15 +1599,16 @@ body.bright #add-shelf-btn, body.bright #import-btn { color: #b4b4b4; border-col
   box-shadow: 0 3px 14px rgba(0,0,0,0.4);
 }
 
-::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-thumb { background: transparent; border-radius: 3px; }
+/* 11px to grab, the thumb drawn 7px inside it (the border is see-through) */
+::-webkit-scrollbar { width: 11px; height: 11px; }
+::-webkit-scrollbar-thumb { background: transparent; border-radius: 6px; border: 2px solid transparent; background-clip: padding-box; min-height: 44px; }
 ::-webkit-scrollbar-track { background: transparent; }
 /* the thumb only paints while the pane is actively scrolling */
-.show-scrollbar::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.16); }
-.show-scrollbar::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.28); }
+.show-scrollbar::-webkit-scrollbar-thumb { background-color: rgba(255, 255, 255, 0.16); }
+.show-scrollbar::-webkit-scrollbar-thumb:hover { background-color: rgba(255, 255, 255, 0.28); }
 /* bright mode is still a dark theme — thumbs stay light, just more present */
-body.bright .show-scrollbar::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.26); }
-body.bright .show-scrollbar::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.4); }
+body.bright .show-scrollbar::-webkit-scrollbar-thumb { background-color: rgba(255, 255, 255, 0.26); }
+body.bright .show-scrollbar::-webkit-scrollbar-thumb:hover { background-color: rgba(255, 255, 255, 0.4); }
 
 /* pinned notes pane: the page column shifts left to clear the pane */
 #editor-view.side-pinned #paper-scroll { left: calc(50% - 125px); }
@@ -1663,6 +1805,24 @@ body.light .modal input { background: #fff; border-color: #cfcac0; color: #1c1a1
 body.light .modal input:focus { border-color: var(--accent); }
 body.light .btn-quiet { color: #5f5b53; }
 body.light .btn-quiet:hover { color: #1c1a17; }
+/* File → Export → Manuscript Format… (app.js, MANUSCRIPT FORMAT) */
+.ms-modal { width: 640px; }
+.ms-modal .ms-lead { font-size: 13px; color: var(--muted); }
+.ms-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+.ms-modal fieldset { border: none; margin: 0; padding: 0; min-width: 0; }
+.ms-modal legend { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin-bottom: 8px; }
+.ms-modal label { margin-bottom: 10px; font-size: 12.5px; }
+.ms-modal input[type="text"], .ms-modal input[type="email"], .ms-modal textarea { margin-top: 4px; }
+.ms-modal textarea { display: block; width: 100%; margin-top: 4px; padding: 8px 12px; background: var(--bg); border: 1px solid #3a3a3a; border-radius: 6px; color: #eee; font: inherit; font-size: 13px; resize: vertical; }
+.ms-modal textarea:focus { outline: none; border-color: var(--accent); }
+.ms-modal .ms-inline { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.ms-modal .ms-inline input { display: inline; width: auto; margin: 0; }
+.ms-font { display: flex; gap: 16px; margin: 4px 0 6px; }
+.ms-header-eg { font-size: 11.5px !important; color: var(--muted); margin: -4px 0 10px !important; font-family: "Times New Roman", serif; }
+.ms-count { font-size: 12.5px !important; color: var(--muted); margin: 6px 0 14px !important; }
+.ms-actions { display: flex; justify-content: flex-end; gap: 10px; }
+body.light .ms-modal textarea { background: #fff; border-color: #cfcac0; color: #1c1a17; }
+@media (max-width: 700px) { .ms-cols { grid-template-columns: 1fr; } }
 body.light .fr-font, body.light .fr-choice { background: #fff; border-color: #d6d1c7; color: #2b2926; }
 body.light .fr-font:hover { border-color: #a09a8f; }
 body.light .fr-font.sel { border-color: var(--accent); color: var(--accent); }
@@ -1679,7 +1839,7 @@ body.light .up-bar { background: #e4e0d8; }
 body.light .sheet, body.light #aux-paper { box-shadow: 0 1px 3px rgba(0,0,0,0.06), 0 6px 28px rgba(0,0,0,0.1); }
 body.light .spell-menu { background: #fff; border-color: #d9d4ca; box-shadow: 0 6px 24px rgba(0,0,0,0.14); }
 body.light .spell-menu button { color: #2b2926; }
-body.light .spell-menu button:hover:not(:disabled) { background: #f0ede7; }
+body.light .spell-menu button:hover:not(:disabled), body.light .spell-menu button:focus-visible { background: #f0ede7; }
 body.light .spell-menu button:disabled { color: #857f75; }
 body.light .spell-menu .sm-sep { background: #e6e2da; }
 
@@ -1731,8 +1891,8 @@ body.light .shortcut-row small, body.light .shortcut-or { color: #6f6a60; }
 body.light .shortcut-row kbd { color: #2b2926; background: #f4f2ee; border-color: #cfcac0; }
 body.light .shortcuts-footer span { color: #5a564e; }
 body.light .shortcuts-content::-webkit-scrollbar-thumb { background: #c4bfb5; }
-body.light .show-scrollbar::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.18); }
-body.light .show-scrollbar::-webkit-scrollbar-thumb:hover { background: rgba(0,0,0,0.3); }
+body.light .show-scrollbar::-webkit-scrollbar-thumb { background-color: rgba(0,0,0,0.18); }
+body.light .show-scrollbar::-webkit-scrollbar-thumb:hover { background-color: rgba(0,0,0,0.3); }
 
 body.light .nav-gap::before { border-top-color: #d3cec4; }
 body.light .nav-gap .ng-plus { border-color: #cfcac0; color: #8f8a80; }
@@ -1764,8 +1924,8 @@ body.light.bright .stats-legend { color: #5f5b53; }
 body.light.bright .ghost-page { border-color: rgba(0,0,0,0.4); color: rgba(0,0,0,0.62); }
 body.light.bright .nav-gap .ng-plus { color: #5f5b53; border-color: #8f897e; }
 body.light.bright .pop-menu button:disabled { color: #77726a; }
-body.light.bright .show-scrollbar::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.3); }
-body.light.bright .show-scrollbar::-webkit-scrollbar-thumb:hover { background: rgba(0,0,0,0.45); }
+body.light.bright .show-scrollbar::-webkit-scrollbar-thumb { background-color: rgba(0,0,0,0.3); }
+body.light.bright .show-scrollbar::-webkit-scrollbar-thumb:hover { background-color: rgba(0,0,0,0.45); }
 
 
 /* ===== Greek typography =====
@@ -1992,3 +2152,241 @@ body.night #paper.script #chapters { box-shadow: 0 4px 30px rgba(0,0,0,0.7); }
 #nav-pane.script .nav-item.sp-scene .n-row { justify-content: flex-start; gap: 8px; }
 #nav-pane.script .nav-item.sp-scene .n-words { margin-left: auto; }
 body.light #nav-pane.script .nav-item.sp-scene .n-num { color: #8f8a80; }
+
+/* a script's title, set bold, underlined or italic as a whole (⌘B ⌘U ⌘I) */
+#paper.script #tp-title.tp-b { font-weight: bold; }
+#paper.script #tp-title.tp-u { text-decoration: underline; }
+#paper.script #tp-title.tp-i { font-style: italic; }
+/* a loose card that holds writing set aside from the manuscript: how many words */
+.ob-held { margin-top: 6px; font-size: 11px; letter-spacing: 0.04em; color: var(--muted); }
+
+/* cards picked together (⌘-click, Shift-click, or a sweep across the board) */
+/* red, not the accent's gold: gold on a cream card can't be told from no
+   border at all (#351) */
+.ob-cell.ob-sel .ob-card { box-shadow: 0 0 0 3px var(--red), 0 2px 10px rgba(0, 0, 0, 0.25); }
+.ob-lasso { position: fixed; z-index: 50; border: 1px solid var(--red); background: color-mix(in srgb, var(--red) 10%, transparent); border-radius: 3px; pointer-events: none; }
+.ob-lassoing, .ob-lassoing * { user-select: none !important; -webkit-user-select: none !important; }
+
+/* a scene's card note on its empty first line, until the scene is written (#339) */
+.sp-geom > p[data-scene-note]:not([data-ghost])::after, .sp-narrow > p[data-scene-note]:not([data-ghost])::after {
+  content: attr(data-scene-note); position: absolute; left: 0; top: 0; right: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; /* one line: it takes no room on the page */
+  font-style: italic; color: color-mix(in srgb, var(--ink) 36%, var(--paper)); pointer-events: none;
+}
+.sp-geom > p[data-scene-note], .sp-narrow > p[data-scene-note] { position: relative; }
+
+/* the shelf's own size (#336), kept on this device */
+#shelves { zoom: var(--shelf-zoom, 1); }
+
+/* the note being worked on, plain to see among the others (#351): red, like
+   the picked cards on the Outline */
+.sticky.current { box-shadow: 0 0 0 2px var(--red); }
+body.light .sticky.current { box-shadow: 0 0 0 2px var(--red); }
+
+/* the open book's title beside the window's buttons (macOS, where the system's
+   own bar is hidden behind the page; elsewhere the system's bar shows it) */
+body.mac-bar #dragstrip {
+  padding-left: 84px; line-height: 28px; font-size: 12px; color: #6a6a6a;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-right: 84px;
+  pointer-events: auto; user-select: none;
+}
+body.light.mac-bar #dragstrip { color: #8a857c; }
+body.full-screen #dragstrip, body.focus-mode #dragstrip { color: transparent; }
+
+/* ---------- snapshots (SNAPSHOTS in app.js): the right-hand pane on the Darlings tab ---------- */
+.side-title-snaps, #snap-list { display: none; }
+#editor-view.darlings-tab .side-title-notes, #editor-view.darlings-tab #sticky-list { display: none; }
+#editor-view.darlings-tab .side-title-snaps { display: inline; }
+#editor-view.darlings-tab #snap-list { display: block; }
+/* the pane stays open there, so the page moves over to clear it */
+#editor-view.darlings-tab #paper-scroll { left: calc(50% - 125px * var(--ui-zoom)); }
+#editor-view.darlings-tab.nav-pinned #paper-scroll { left: calc(50% - 1px * var(--ui-zoom)); }
+#snap-list { padding-bottom: 12px; }
+.snap-item {
+  display: flex; gap: 10px; align-items: flex-start; width: 100%; text-align: left;
+  background: none; border: none; border-left: 2px solid transparent; padding: 8px 14px; color: #ccc; min-height: 44px;
+}
+.snap-item:hover { background: rgba(255,255,255,0.04); }
+.snap-item.on { background: rgba(255,255,255,0.07); border-left-color: var(--red); }
+.snap-item:focus-visible { outline: 1px solid #666; outline-offset: -1px; }
+.snap-dot { flex: none; width: 8px; height: 8px; margin-top: 5px; border-radius: 50%; box-sizing: border-box; border: 1.5px solid var(--muted); }
+.snap-item.snap-k .snap-dot { background: var(--red); border-color: var(--red); }
+.snap-item.snap-darlings .snap-dot { border-radius: 2px; background: var(--accent); border-color: var(--accent); }
+.snap-line { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.snap-t { font-size: 13px; color: #eee; }
+.snap-s { font-size: 11px; color: var(--muted); }
+.snap-group { padding: 12px 16px 4px; font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase; color: #666; }
+.snap-empty { padding: 10px 16px; font-size: 12px; line-height: 1.5; color: #777; }
+.snap-chapters { display: flex; flex-direction: column; padding: 0 0 6px 36px; }
+.snap-ch { background: none; border: none; text-align: left; font-size: 12px; color: #b9b4aa; padding: 4px 14px 4px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.snap-ch:hover { color: #fff; text-decoration: underline; }
+body.light .snap-item { color: #3a362f; }
+body.light .snap-item:hover { background: rgba(0,0,0,0.04); }
+body.light .snap-item.on { background: rgba(0,0,0,0.06); }
+body.light .snap-t { color: #1c1a17; }
+body.light .snap-group, body.light .snap-empty { color: #857f73; }
+body.light .snap-ch { color: #5a554c; }
+body.light .snap-ch:hover { color: #1c1a17; }
+/* the book as it was, on the Darlings page */
+#snap-view { font-family: var(--body-font); }
+.snap-band {
+  position: sticky; top: 0; z-index: 2; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 16px;
+  margin: 0 -8px 28px; padding: 12px 8px; background: var(--paper); border-bottom: 1px solid color-mix(in srgb, var(--ink) 14%, var(--paper));
+  font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+}
+.snap-band-what { display: flex; flex-direction: column; gap: 2px; }
+.snap-band-when { font-size: 15px; color: var(--ink); }
+.snap-band-sub { font-size: 12px; color: color-mix(in srgb, var(--ink) 55%, var(--paper)); }
+.snap-band-do { display: flex; gap: 8px; }
+.snap-band button, .snap-one {
+  font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; font-size: 12px;
+  height: 30px; padding: 0 12px; border-radius: 6px; background: none;
+  color: var(--ink); border: 1px solid color-mix(in srgb, var(--ink) 25%, var(--paper));
+}
+.snap-band button:hover, .snap-one:hover { border-color: var(--ink); }
+.snap-band .snap-all { background: var(--red); border-color: var(--red); color: #fff; }
+.snap-band .snap-all:hover { background: #a93226; }
+.snap-band .snap-all:disabled { opacity: 0.35; cursor: default; }
+.snap-chapter { margin-bottom: 40px; scroll-margin-top: 84px; }
+.snap-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; margin-bottom: 16px; padding-bottom: 6px; border-bottom: 1px solid color-mix(in srgb, var(--ink) 10%, var(--paper)); }
+.snap-head h3 { font-weight: normal; font-size: 18px; color: var(--ink); margin-right: auto; }
+.snap-tag { font: 11px -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; letter-spacing: 0.04em; color: var(--red); }
+.snap-chapter.same .snap-tag { color: color-mix(in srgb, var(--ink) 45%, var(--paper)); }
+.snap-chapter.same .snap-body { opacity: 0.55; }
+.snap-body { user-select: text; cursor: text; }
+.snap-body p.snap-gone { background: rgba(192, 57, 43, 0.14); box-shadow: -6px 0 0 rgba(192, 57, 43, 0.14), 6px 0 0 rgba(192, 57, 43, 0.14); }
+::highlight(neo-snap-gone) { background-color: rgba(192, 57, 43, 0.24); }
+
+/* the Outline's cards for where the caret is, atop the right-hand pane (#340) */
+#side-cards { display: flex; flex-direction: column; gap: 10px; padding: 0 12px; }
+#side-cards:not(:empty) { margin-bottom: 22px; }
+#editor-view.outline-tab #side-cards, #editor-view.darlings-tab #side-cards { display: none; }
+.side-card { background: #2a2a26; border: 1px solid #3a3934; border-radius: 6px; padding: 10px 12px; }
+.side-card.current { box-shadow: 0 0 0 2px var(--red); border-color: transparent; }
+.side-cards-title { font-size: 12px; text-transform: uppercase; letter-spacing: 2px; color: var(--muted); padding: 0 4px; }
+.side-card-head { font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #bdb8ad; margin-bottom: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.side-card-section .side-card-head { font-weight: 500; color: #8f8a80; }
+.side-card-head { cursor: pointer; border-radius: 3px; }
+.side-card-head:hover, .side-card-head:focus-visible { color: #ece7dc; }
+.side-card-head:focus-visible { outline: 1px solid #6b675f; outline-offset: 2px; }
+.side-card textarea {
+  width: 100%; background: none; border: none; outline: none; resize: none; overflow: hidden;
+  color: #ddd; font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; padding: 0;
+}
+.side-card textarea::placeholder { color: #6b675f; font-style: italic; }
+body.light .side-card { background: #fbf5e3; border-color: #e6dfcc; }
+body.light .side-card-head { color: #5f5a50; }
+body.light .side-card-head:hover, body.light .side-card-head:focus-visible { color: #1f1d1a; }
+body.light .side-card textarea { color: #2b2926; }
+body.light .side-card textarea::placeholder { color: #a39d90; }
+
+/* ---------- the Notes tab (NOTES PAGES in app.js): a page for the book and one per chapter ---------- */
+/* the left pane turns the pages, the right one shows what the manuscript knows about the chapter */
+.nav-title-notes, #notes-nav, .side-title-chnotes, #notes-side { display: none; }
+#editor-view.notes-tab .nav-title-chapters, #editor-view.notes-tab #nav-list, #editor-view.notes-tab #nav-add { display: none; }
+#editor-view.notes-tab .nav-title-notes { display: inline; }
+#editor-view.notes-tab #notes-nav { display: block; }
+#editor-view.notes-tab .side-title-notes, #editor-view.notes-tab #sticky-list, #editor-view.notes-tab #side-cards { display: none; }
+#editor-view.notes-tab .side-title-chnotes { display: inline; }
+#editor-view.notes-tab #notes-side { display: block; }
+.notes-item .n-row { cursor: pointer; }
+.notes-item:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.notes-item.notes-book .n-label { font-weight: 600; }
+.notes-item .nav-note:empty::before { content: attr(data-ph); }
+.notes-here {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--accent);
+  display: inline-block; flex-shrink: 0; margin: 0 auto 0 8px;
+}
+.notes-item .n-row > .n-label + .notes-here + span { margin-left: 8px; }
+.notes-sep { height: 1px; background: #2c2c2c; margin: 6px 18px; }
+.notes-part {
+  padding: 14px 18px 4px; font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase; color: #5d5d5d;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ns-label {
+  display: flex; justify-content: space-between; padding: 10px 18px 6px;
+  font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase; color: #6a6a6a;
+}
+.ns-empty { padding: 0 18px 6px; font-size: 12px; color: #555; font-style: italic; }
+.ns-card { cursor: default; }
+.ns-card.ns-darling { font-family: var(--body-font); font-size: 14px; border-left-color: #6a6a6a; }
+.ns-card .ns-text { white-space: pre-wrap; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 6; overflow: hidden; }
+.ns-card .s-actions { margin-top: 4px; }
+.ns-outline { outline: none; min-height: 18px; cursor: text; }
+.ns-outline:empty::before { content: attr(data-ph); color: #666; font-style: italic; }
+/* the page: a chapter's names the chapter, with the way back up to the book's */
+#notes-up {
+  display: block; margin: -40px auto 22px; background: none; border: none; padding: 2px 6px;
+  font: 12px/1.4 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; letter-spacing: 1px;
+  color: var(--muted); cursor: pointer;
+}
+#notes-up:hover, #notes-up:focus-visible { color: var(--accent); }
+#editor-view:not(.notes-tab) #notes-up, #editor-view:not(.notes-tab) #notes-outline { display: none; }
+#aux-paper.notes-chapter #aux-title { margin-bottom: 18px; }
+#notes-outline {
+  max-width: 34em; margin: 0 auto 40px; text-align: center; color: #8a8a8a;
+  font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+}
+#notes-outline b { font-weight: 500; font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase; margin-right: 8px; }
+#aux-editor[data-ph]:not([data-ph=""]):empty::before { content: attr(data-ph); }
+body.light .notes-sep { background: #dedad2; }
+body.light .notes-part, body.light .ns-label { color: #8f8a80; }
+body.light .ns-empty, body.light .ns-outline:empty::before { color: #a39d92; }
+body.light #notes-outline { color: #6f6b63; }
+
+/* ---------- footnotes (FOOTNOTES in app.js) ---------- */
+/* the number is the page's own count, one series through the book (as the
+   chapter lists and every export number them), never saved */
+#chapters { counter-reset: neo-fn; }
+.chapter-body .fn { counter-increment: neo-fn; cursor: pointer; }
+.chapter-body .fn::after {
+  content: counter(neo-fn); color: var(--accent);
+  font: 600 0.62em/0 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+  vertical-align: super; padding: 0 1px 0 0.5px; font-style: normal;
+}
+.chapter-body .fn:hover::after { text-decoration: underline; }
+.chapter-body p[data-fnopen] { margin-bottom: var(--fn-h, 3em); }
+.fn-box {
+  position: absolute; z-index: 3; box-sizing: border-box; display: flex; gap: 10px; align-items: baseline;
+  padding: 8px 12px; border-left: 2px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 9%, var(--paper));
+  font-family: var(--body-font); line-height: 1.5; color: var(--ink);
+  font-size: calc(var(--editor-size, 17px) * 0.82 * var(--page-zoom, 1));
+}
+.fn-box .fn-num { color: var(--accent); font: 600 11px -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; }
+.fn-box .fn-text { flex: 1; min-width: 0; outline: none; white-space: pre-wrap; }
+.fn-box .fn-text:empty::before { content: attr(data-ph); color: color-mix(in srgb, var(--ink) 35%, var(--paper)); font-style: italic; }
+.fn-box .fn-hint {
+  flex: none; font: 10px -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+  color: color-mix(in srgb, var(--ink) 40%, var(--paper));
+}
+/* a chapter's notes under its last line, the way a book sets them */
+.fn-list {
+  margin: 2.4em 0 0; padding-top: 0.8em; position: relative;
+  font-family: var(--body-font); line-height: 1.5; color: var(--ink);
+  font-size: calc(var(--editor-size, 17px) * 0.8 * var(--page-zoom, 1));
+}
+.fn-list::before {
+  content: ''; position: absolute; top: 0; left: 0; width: 30%;
+  border-top: 1px solid color-mix(in srgb, var(--ink) 25%, var(--paper));
+}
+.fn-row { padding: 2px 0; cursor: pointer; border-radius: 3px; outline: none; }
+.fn-row:hover, .fn-row:focus-visible { background: color-mix(in srgb, var(--accent) 9%, var(--paper)); }
+.fn-row .fn-n { color: var(--accent); font: 600 0.75em -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; margin-right: 8px; }
+
+/* Korean interface. Hangul breaks between any two letters unless told to
+   keep words whole, and the wide tracking of the small-caps labels pulls a
+   word apart into single syllables. Both apply to NEO's own labels only:
+   the page, the title page and the covers keep the book's design. Hangul
+   faces have no italic, and a slanted one is only the upright letters
+   sheared, so Hangul stays upright everywhere, the page included; Latin
+   faces keep their italics. */
+html:lang(ko) body { word-break: keep-all; overflow-wrap: break-word; font-synthesis-style: none; }
+html:lang(ko) #paper, html:lang(ko) .book { word-break: normal; }
+html:lang(ko) :is(#aux-paper h2, .pen-slot, .shelf-label, .shelf-bound-mark, .pt-label, .ps-name, .ps-label,
+  .ol-part-name, #outline-views button, .ob-part, .ob-mark.ob-word, .ob-scene .ob-foot, .ob-held,
+  #nav-head, .nav-item .n-label, #nav-pane.script .sp-scenes-head, .pop-menu .pm-title,
+  #side-head, .sticky .s-ch, .stats-nums .lbl, .ms-modal legend, .snap-group, .snap-tag,
+  .side-cards-title, .side-card-head, .notes-part, .ns-label, #notes-up, #notes-outline b) {
+  letter-spacing: 0.04em;
+}

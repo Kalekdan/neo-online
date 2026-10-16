@@ -6,6 +6,10 @@
     "one": "{n} book imported onto “{shelf}” — chapters and scene breaks detected",
     "other": "{n} books imported onto “{shelf}” — chapters and scene breaks detected"
   },
+  "{n} chapters added to “{title}”": {
+    "one": "{n} chapter added to “{title}”",
+    "other": "{n} chapters added to “{title}”"
+  },
   "{n} chapters": {
     "one": "{n} chapter",
     "other": "{n} chapters"
@@ -53,5 +57,25 @@
   "Sprint ended — {n} words in {min} min": {
     "one": "Sprint ended — {n} word in {min} min",
     "other": "Sprint ended — {n} words in {min} min"
+  },
+  "{n} chapters changed": {
+    "one": "{n} chapter changed",
+    "other": "{n} chapters changed"
+  },
+  "{n} chapters differ from now": {
+    "one": "{n} chapter differs from now",
+    "other": "{n} chapters differ from now"
+  },
+  "{n} chapters added since": {
+    "one": "{n} chapter added since",
+    "other": "{n} chapters added since"
+  },
+  "{n} darlings": {
+    "one": "{n} darling",
+    "other": "{n} darlings"
+  },
+  "Snapshot taken, {time}: {n} chapters changed. It’s on the Darlings tab.": {
+    "one": "Snapshot taken, {time}: {n} chapter changed. It’s on the Darlings tab.",
+    "other": "Snapshot taken, {time}: {n} chapters changed. It’s on the Darlings tab."
   }
 }

@@ -101,6 +101,15 @@ function chapterName(chId, meta = book) {
   if (k === 'unnumbered') return ((meta.chapterTitles || {})[chId] || '').trim() || t('Untitled');
   return kindName(k);
 }
+// the chapter a note sits in, for the notes pane: its name, or for an
+// unnumbered chapter with no title (whose name would be Untitled), its
+// opening words (#346)
+function stickyChapterLabel(chId) {
+  if (chapterKind(chId) !== 'unnumbered' || ((book.chapterTitles || {})[chId] || '').trim()) return chapterName(chId);
+  const words = chapterText(chId).replace(/\s+/g, ' ').trim();
+  if (!words) return t('Untitled');
+  return words.length > 32 ? words.slice(0, 30).replace(/\s+\S*$/, '') + '…' : words;
+}
 // a chapter's heading as the reader sees it: its name, then any title —
 // once, for an unnumbered chapter, whose name is its title
 // The dash between a chapter's number and its title follows the book's
@@ -180,6 +189,8 @@ function setChapterKind(chId, kind) {
 }
 
 const isUntitled = (s) => !s || s === 'Untitled' || s === t('Untitled');
+// a title as the writer reads it: the untitled default in the current language
+const shownTitle = (s) => (isUntitled(s) ? t('Untitled') : s);
 
 // ---------- state ----------
 let library = null;          // library.json
@@ -203,10 +214,42 @@ let saveTimers = {};
 let libraryGeneration = 0;
 let libraryWritesPending = 0;
 function writeLibrary(lib = library) {
+  rememberDeviceLook(lib);
   libraryGeneration++;
   libraryWritesPending++;
   return new Promise((resolve) => resolve(window.neo.writeLibrary(lib)))
     .finally(() => { libraryWritesPending--; });
+}
+
+// How NEO looks is each device's own: dark on the iPad, light on the PC.
+// These settings are kept on the device as well as in library.json. The
+// library's copy is the last device's, so a device opening the library for
+// the first time starts out the way the writer last had it, and from then on
+// keeps its own.
+const DEVICE_LOOK = ['pageTheme', 'uiBright', 'uiBrightAside', 'uiZoom', 'editorFontSize', 'typewriter', 'nbspMarks', 'focus', 'posMode', 'outlineView', 'vimKeys', 'pagedView', 'twoPageView', 'pageWidth'];
+const DEVICE_LOOK_KEY = 'neo-device-look';
+const EDITOR_SIZE_MIN = 8;
+const EDITOR_SIZE_MAX = 22;
+function deviceLookOf(lib) {
+  const out = {};
+  for (const k of DEVICE_LOOK) if (lib && lib[k] !== undefined) out[k] = lib[k];
+  return out;
+}
+function rememberDeviceLook(lib) {
+  try { localStorage.setItem(DEVICE_LOOK_KEY, JSON.stringify(deviceLookOf(lib))); } catch { /* storage can be off */ }
+}
+// a library read from disk takes this device's look, or (on a device new to
+// it) gives this device the look it carries
+function applyDeviceLook(lib) {
+  if (!lib) return lib;
+  let mine = null;
+  try { mine = JSON.parse(localStorage.getItem(DEVICE_LOOK_KEY) || 'null'); } catch { /* none kept */ }
+  if (!mine || typeof mine !== 'object') { rememberDeviceLook(lib); return lib; }
+  for (const k of DEVICE_LOOK) {
+    if (mine[k] !== undefined) lib[k] = mine[k];
+    else delete lib[k];
+  }
+  return lib;
 }
 
 const $ = (sel) => document.querySelector(sel);
@@ -232,6 +275,18 @@ const IS_LINUX = !IS_MAC && /linux/i.test(navigator.platform) && !window.Capacit
 const NO_HOVER = !!(window.matchMedia && window.matchMedia('(hover: none)').matches) || !!window.Capacitor;
 // NEO Pocket (the Android and iOS shell)
 const IS_POCKET = !!window.Capacitor;
+
+// Simple NEO, and File → Show More Features (library.moreFeatures). Simple is
+// the default: the features behind the switch keep their menu items, keys
+// and right-click choices out of sight, and their settings act as NEO's own
+// defaults while the writer's choices wait in library.json for the switch to
+// go back on. Nothing a book already holds is hidden: a script, a footnote,
+// a bound shelf, a painted cover open and export as before. Pocket (Android
+// and iOS) is always simple and has no switch. SIMPLE NEO near the end of
+// this file decides the switch for a library that predates it.
+const moreOn = () => !IS_POCKET && !!(library && library.moreFeatures);
+// *italic* and **bold** typed as Markdown are behind the switch too
+const markdownOff = () => !!library && (!moreOn() || !!library.markdownOff);
 
 // Touch has no right-click: a long press on a book, a shelf name or a chapter
 // heading opens the same menu. Not inside the text itself — there a long
@@ -286,14 +341,52 @@ const KPH = K('⌘⇧X', 'Ctrl+Shift+X');
 const KDA = K('⌘⇧D', 'Ctrl+Shift+D');
 const KHELP = K('⌘/', 'Ctrl+/');
 
-// Scrollbars stay invisible until you scroll, then fade away again —
-// chrome only when needed.
+// Scrollbars stay out of sight until they're wanted, then wait for you:
+// they show while scrolling, whenever the pointer comes near the right edge
+// of anything that scrolls, and the whole time one is held; they fade a
+// moment after the pointer leaves (#341: one used to vanish on the way to
+// it). Touch screens scroll with a finger and never show them.
+function showScrollbar(el, ms = 1200) {
+  el.classList.add('show-scrollbar');
+  clearTimeout(el._neoSbHide);
+  if (ms) el._neoSbHide = setTimeout(() => { if (!el._neoSbHeld && !el._neoSbNear) el.classList.remove('show-scrollbar'); }, ms);
+}
 document.addEventListener('scroll', (e) => {
   const el = e.target;
   if (!el || !el.classList) return;
-  el.classList.add('show-scrollbar');
-  clearTimeout(el._neoSbHide);
-  el._neoSbHide = setTimeout(() => el.classList.remove('show-scrollbar'), 750);
+  showScrollbar(el);
+}, true);
+// what scrolls under the pointer, if the pointer is in its scrollbar's strip
+function scrollbarUnder(e) {
+  for (let el = e.target; el && el !== document.documentElement; el = el.parentElement) {
+    if (el.nodeType !== 1 || el.scrollHeight <= el.clientHeight + 1) continue;
+    const oy = getComputedStyle(el).overflowY;
+    if (oy !== 'auto' && oy !== 'scroll') continue;
+    const r = el.getBoundingClientRect();
+    return e.clientX >= r.right - 24 && e.clientX <= r.right ? el : null;
+  }
+  return null;
+}
+let sbNear = null;
+let sbFrame = 0;
+document.addEventListener('mousemove', (e) => {
+  if (sbFrame) return;
+  sbFrame = requestAnimationFrame(() => {
+    sbFrame = 0;
+    const el = scrollbarUnder(e);
+    if (el === sbNear) return;
+    if (sbNear) { sbNear._neoSbNear = false; showScrollbar(sbNear); }
+    sbNear = el;
+    if (el) { el._neoSbNear = true; showScrollbar(el, 0); }
+  });
+}, { passive: true });
+document.addEventListener('mousedown', (e) => {
+  const el = scrollbarUnder(e);
+  if (!el) return;
+  el._neoSbHeld = true;
+  showScrollbar(el, 0);
+  const up = () => { el._neoSbHeld = false; showScrollbar(el); window.removeEventListener('mouseup', up, true); };
+  window.addEventListener('mouseup', up, true);
 }, true);
 
 function askInput(title, placeholder, value = '') {
@@ -447,6 +540,17 @@ document.addEventListener('mousedown', (e) => {
   if (btn) btn.click();
 });
 
+// The open book's title up where the window's buttons are: the system's own
+// title bar on Windows and Linux (and the Window menu everywhere), and on
+// macOS, where that bar is hidden behind the page, the strip beside the buttons
+if (IS_MAC && !IS_POCKET) document.body.classList.add('mac-bar');
+function showWindowTitle() {
+  const title = book ? (book.title || t('Untitled')) : '';
+  document.title = title ? title + ' — NEO' : 'NEO';
+  const strip = IS_MAC && !IS_POCKET && document.querySelector('#dragstrip'); // the desktop's page only
+  if (strip) strip.textContent = title;
+}
+
 function toast(msg, ms = 4000) {
   const h = $('#hint');
   h.textContent = msg;
@@ -488,11 +592,19 @@ function countWords(text) {
   return (trimmed.match(/\S+/g) || []).filter((w) => /[\p{L}\p{N}]/u.test(w)).length;
 }
 
+// A copy of a chapter without the marks that aren't words. A chapter on the
+// page is copied node for node: writing it out as HTML and reading it back
+// costs twice as much and gives the same tree.
+const UNCOUNTED = '.darling-anchor, .ph-mark, .ghost, .fn';
 function cleanChapterEl(id) {
   const el = document.querySelector(`.chapter[data-id="${id}"] .chapter-body`);
-  const holder = document.createElement('div');
-  holder.innerHTML = el ? el.innerHTML : (chapterHTML[id] || '');
-  holder.querySelectorAll('.darling-anchor, .ph-mark, .ghost').forEach((n) => n.remove());
+  let holder;
+  if (el) holder = el.cloneNode(true);
+  else {
+    holder = document.createElement('div');
+    holder.innerHTML = chapterHTML[id] || '';
+  }
+  holder.querySelectorAll(UNCOUNTED).forEach((n) => n.remove());
   return holder;
 }
 // Text a line to each paragraph. innerText does that only for what is laid
@@ -508,8 +620,108 @@ const chapterText = (id) => plainText(cleanChapterEl(id));
 // Word counts are cached per chapter and only recomputed for the chapter being edited.
 let wordCache = {};
 function chapterWords(chId) {
-  if (wordCache[chId] == null) wordCache[chId] = countWords(chapterText(chId));
+  if (wordCache[chId] == null) {
+    const body = document.querySelector(`.chapter[data-id="${chId}"] .chapter-body`);
+    const n = body ? paragraphWords(body) : null;
+    wordCache[chId] = n != null ? n : countWords(chapterText(chId));
+  }
   return wordCache[chId];
+}
+
+// A chapter on the page is also counted paragraph by paragraph, and each
+// paragraph keeps its count until it changes, so a keystroke in a long
+// chapter recounts one paragraph instead of all of them. The sum is the
+// whole-chapter count because chapterText ends every paragraph with a line
+// break: no word runs from one paragraph into the next. Where that can't be
+// promised, paragraphWords answers null and the chapter is counted whole.
+// <p> → { n: its words, seg: has Thai, Lao…; all, allSeg: the same with marks and ghosts }
+const paraWords = new WeakMap();
+// A paragraph is forgotten when its words, its marks or a class change (a
+// ghost becoming text changes its count with no new letter), and whenever it
+// is put on the page, so one changed while off the page is counted again.
+function forgetParaWords(rec) {
+  const el = rec.target.nodeType === Node.ELEMENT_NODE ? rec.target : rec.target.parentElement;
+  const p = el && el.closest('.chapter-body > *');
+  if (p) paraWords.delete(p);
+  for (const n of rec.addedNodes) {
+    if (n.nodeType !== Node.ELEMENT_NODE) continue;
+    paraWords.delete(n);
+    if (n.firstElementChild) n.querySelectorAll('.chapter-body > *').forEach((q) => paraWords.delete(q));
+  }
+}
+const paraWordsWatch = new MutationObserver((recs) => recs.forEach(forgetParaWords));
+paraWordsWatch.observe($('#chapters'), {
+  subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['class']
+});
+function paragraphWords(body) {
+  paraWordsWatch.takeRecords().forEach(forgetParaWords); // edits not yet reported
+  let sum = 0;
+  for (let c = body.firstChild; c; c = c.nextSibling) {
+    if (c.nodeType === Node.TEXT_NODE) {
+      if (/\S/.test(c.data)) return null; // loose words could run into a paragraph's
+      continue;
+    }
+    if (c.nodeType !== Node.ELEMENT_NODE) continue;
+    // only blocks end in a line break; a loose inline element could join words
+    if (c.tagName !== 'P' && c.tagName !== 'DIV' && c.tagName !== 'BR' && !c.matches(UNCOUNTED)) return null;
+    const e = paraEntry(c);
+    if (e.n === undefined) {
+      if (c.matches(UNCOUNTED)) { e.n = 0; e.seg = false; }
+      else {
+        const copy = c.cloneNode(true);
+        copy.querySelectorAll(UNCOUNTED).forEach((n) => n.remove());
+        const text = plainText(copy);
+        e.n = countWords(text);
+        e.seg = segmented(text);
+      }
+    }
+    // countWords picks one segmenter for a whole chapter by the first script
+    // it finds, which a paragraph counted alone can't know
+    if (e.seg) return null;
+    sum += e.n;
+  }
+  return sum;
+}
+function paraEntry(p) {
+  let e = paraWords.get(p);
+  if (!e) paraWords.set(p, e = {});
+  return e;
+}
+const segmented = (text) => SEGMENTED_SCRIPTS.some((s) => s.chars.test(text));
+
+// Page of pages counts the words from the chapter's start to the caret as
+// they stand, marks and ghosts too. The paragraphs above the caret's give
+// theirs from a second kept count, so only the caret's own is counted. null
+// where they can't be summed, and the range is counted whole.
+function wordsBeforeCaret(body, node, offset) {
+  paraWordsWatch.takeRecords().forEach(forgetParaWords);
+  const el = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+  const top = el && el.closest('.chapter-body > *');
+  if (!top || top.parentNode !== body) return null;
+  let sum = 0;
+  for (let c = body.firstChild; c !== top; c = c.nextSibling) {
+    if (c.nodeType === Node.TEXT_NODE) {
+      if (/\S/.test(c.data)) return null;
+      continue;
+    }
+    if (c.nodeType !== Node.ELEMENT_NODE) continue;
+    // a mark kept in the count is inline: its letters could join the next paragraph's
+    if (c.tagName !== 'P' && c.tagName !== 'DIV' && c.tagName !== 'BR') return null;
+    const e = paraEntry(c);
+    if (e.all === undefined) {
+      const text = plainText(c.cloneNode(true));
+      e.all = countWords(text);
+      e.allSeg = segmented(text);
+    }
+    if (e.allSeg) return null;
+    sum += e.all;
+  }
+  const r = document.createRange();
+  r.setStartBefore(top);
+  r.setEnd(node, offset);
+  const text = plainText(r.cloneContents());
+  if (segmented(text)) return null;
+  return sum + countWords(text);
 }
 
 /* ================================================================== */
@@ -553,7 +765,8 @@ function coverUrl(meta) {
 
 async function loadLibrary() {
   libraryDirPath = await window.neo.libraryPath();
-  library = await window.neo.readLibrary();
+  applyShelfZoom();
+  library = applyDeviceLook(await window.neo.readLibrary());
   // A first shelf is named in the language NEO had when it was made. If the
   // writer never renamed it, it follows a change of language.
   const DEFAULT_SHELF = 'Works in Progress';
@@ -562,6 +775,7 @@ async function loadLibrary() {
   const untouched = (library.shelves || []).filter((s) => s.name === DEFAULT_SHELF && own !== DEFAULT_SHELF);
   for (const s of untouched) s.name = own;
   if (untouched.length) await writeLibrary(library);
+  await decideMoreFeatures();
   if (window.neo.writingStyleState) window.neo.writingStyleState(library.writingStyle);
   if (!library.firstRunDone) {
     showFirstRun();
@@ -820,7 +1034,7 @@ async function renderShelves() {
       e.preventDefault();
       if (isBound(shelf)) { await boundShelfMenu(shelf); return; }
       const choice = await optionModal(escHtml(t('Shelf “{name}”', { name: shelf.name })), null, [
-        {
+        ...(moreOn() ? [{
           label: t('Bind into one book'),
           desc: t('Its titles become one book, with a cover, front and back pages, and one table of contents.'),
           value: 'bind'
@@ -831,7 +1045,7 @@ async function renderShelves() {
             ? t('Collect its {n} works, in shelf order, into a single book with a table of contents.', { n: shelf.bookIds.length })
             : t('Collect the works, in shelf order, into a single book with a table of contents.'),
           value: 'anthology'
-        },
+        }] : []),
         { label: t('Delete shelf'), desc: t('Books move to another shelf. Nothing is deleted from disk.'), danger: true, value: 'del' }
       ]);
       if (choice === 'bind') {
@@ -949,6 +1163,7 @@ async function renderShelves() {
     if (!isBound(shelf)) {
       blank.addEventListener('contextmenu', async (e) => {
         e.preventDefault();
+        if (!moreOn()) return; // scripts are behind Show More Features
         const pick = await popMenu(e.clientX, e.clientY, [
           { label: t('New Book'), value: 'book' },
           { label: t('New Script'), value: 'script' }
@@ -1711,8 +1926,8 @@ function bookTile(meta, opts = {}) {
     bar.firstElementChild.style.width = pct + '%';
   }
   el.title = meta.wordGoal
-    ? t('{title} — {count} / {goal} words', { title: meta.title, count: meta.wordCount || 0, goal: meta.wordGoal })
-    : meta.title;
+    ? t('{title} — {count} / {goal} words', { title: shownTitle(meta.title), count: meta.wordCount || 0, goal: meta.wordGoal })
+    : shownTitle(meta.title);
   el.onclick = () => (opts.cover ? openTitlePage(opts.cover, meta) : openBook(meta.id));
   pressable(el, [el.title, meta.author ? t('by {author}', { author: meta.author }) : ''].filter(Boolean).join(', '));
   const refresh = el.querySelector('.b-refresh');
@@ -1762,68 +1977,84 @@ function bookTile(meta, opts = {}) {
   el.addEventListener('contextmenu', async (e) => {
     e.preventDefault();
     if (opts.cover) { await boundCoverMenu(opts.cover, meta, el); return; }
-    const options = [];
     // on a bound shelf, a title can open a new part of the book
     const home = shelfOf(meta.id);
+    let startPart = false;
     if (isBound(home)) {
       const at = home.bookIds.indexOf(meta.id);
       const prev = at > 0 ? bookMetaCache.get(home.bookIds[at - 1]) : null;
-      if (!(prev && prev.kind === 'part')) {
-        options.push({ label: t('Start a part here'), desc: t('A part page goes in before “{title}”.', { title: escHtml(meta.title) }), value: 'part' });
-      }
+      startPart = !(prev && prev.kind === 'part');
     }
-    // no hover on a touch screen, so the ↻ that lives under the pointer
-    // moves into the menu; picking an image file is a desktop affair
     const script = isScript(meta);
-    if (script) { /* card stock: no cover to change */ } else if (NO_HOVER) options.push({ label: t('New cover'), desc: t('Another abstract cover for this book.'), value: 'refresh' });
-    else options.push({ label: meta.coverImage ? t('Replace cover art…') : t('Set cover art…'), desc: t('Pick an image (2:3 works best). Or just drag one from Finder onto the book.'), value: 'cover' });
-    if (meta.coverImage && !script) {
-      options.push({ label: t('Remove cover art'), desc: t('Deletes the image from the book folder. (To just hide it, use the ↻ on the book.)'), danger: true, value: 'uncover' });
-    }
-    if (!window.Capacitor && !script) options.push({ label: t('Save cover as image…'), desc: t('Full size, with your title and author.'), value: 'saveCover' });
-    // Pocket has no File menu: export lives here and in the ⋯ sheet. On
-    // the desktop it's here too, so a book leaves without being opened
-    if (window.Capacitor) {
-      options.push(script
-        ? { label: t('Export…'), desc: t('Fountain or Final Draft, through the share sheet.'), value: 'export' }
-        : { label: t('Export…'), desc: t('Text, Markdown, HTML, Word or EPUB, through the share sheet.'), value: 'export' });
+    const trashLabel = window.Capacitor ? t('Delete book')
+      : navigator.platform.toLowerCase().includes('win') ? t('Move to Recycle Bin') : t('Move to Trash');
+    const canCopy = !!window.neo.duplicateBook && !isPageMeta(meta) && moreOn();
+    // the cover's own choices, gathered in one place
+    const coverItems = script ? [] : [
+      ...(NO_HOVER ? [] : [{ label: meta.coverImage ? t('Replace cover art…') : t('Set cover art…'), value: 'cover' }]),
+      { label: t('New cover'), value: 'refresh' },
+      ...(!window.Capacitor ? [{ label: t('Save cover as image…'), value: 'saveCover' }] : []),
+      ...(meta.coverImage ? ['-', { label: t('Remove cover art'), value: 'uncover', danger: true }] : [])
+    ];
+    let choice;
+    // (a book's word goal is set in Goals, inside the book)
+    if (NO_HOVER || window.Capacitor || !moreOn()) {
+      // a touch screen, and simple NEO: the larger cards, each saying what it
+      // does. Simple NEO has no cover menu: art is dragged onto the book, and
+      // New cover and Remove cover art stand with the rest.
+      const options = [];
+      if (startPart) options.push({ label: t('Start a part here'), desc: t('A part page goes in before “{title}”.', { title: escHtml(shownTitle(meta.title)) }), value: 'part' });
+      options.push(window.Capacitor
+        ? { label: t('Export…'), desc: script ? t('PDF, Fountain or Final Draft, through the share sheet.') : moreOn() ? t('Text, Markdown, HTML, PDF, Word or EPUB, through the share sheet.') : t('PDF, Word or EPUB, through the share sheet.'), value: 'export' }
+        : { label: t('Export…'), desc: script || moreOn() || isPageMeta(meta) ? '' : t('PDF, Word, EPUB, or a paperback for KDP.'), value: 'export' });
+      if (canCopy) options.push({ label: t('Duplicate'), desc: t('A copy of the whole book on this shelf, to keep as a backup or try another version.'), value: 'duplicate' });
+      if (coverItems.length && moreOn()) options.push({ label: t('Cover'), desc: t('A new cover, your own art, or a saved image.'), value: 'coverMenu' });
+      else if (coverItems.length) {
+        options.push({ label: t('New cover'), desc: t('A fresh abstract and a different title style.'), value: 'refresh' });
+        if (meta.coverImage) options.push({ label: t('Remove cover art'), desc: t('Deletes the image from the book folder. (To just hide it, use the ↻ on the book.)'), danger: true, value: 'uncover' });
+      }
+      options.push(
+        { label: t('Remove from bookshelf'), desc: t('Takes it off your shelves. The files stay safe in your NEO Library folder on disk.'), value: 'remove' },
+        { label: trashLabel, desc: window.Capacitor ? t('Moves the book folder to Deleted Books in your NEO Library, where you can recover it.') : t('Sends the book folder to your system trash, where you can recover it.'), danger: true, value: 'trash' }
+      );
+      choice = await optionModal(t('“{title}”', { title: escHtml(shownTitle(meta.title)) }), null, options);
+      if (choice === 'coverMenu') choice = await optionModal(t('Cover'), null, coverItems.filter((x) => x !== '-'));
     } else {
-      options.push({ label: t('Export…'), value: 'export' });
+      // the desktop: a small menu at the pointer, the cover's choices one level in
+      const items = [];
+      if (startPart) items.push({ label: t('Start a part here'), value: 'part' }, '-');
+      items.push({ label: t('Export…'), value: 'export' });
+      if (canCopy) items.push({ label: t('Duplicate'), value: 'duplicate' });
+      if (coverItems.length) items.push({ label: t('Cover') + '  ›', value: 'coverMenu' });
+      items.push('-', { label: t('Remove from bookshelf'), value: 'remove' }, { label: trashLabel, value: 'trash', danger: true });
+      const x = e.clientX;
+      const y = e.clientY;
+      choice = await popMenu(x, y, items, { title: shownTitle(meta.title), from: el });
+      if (choice === 'coverMenu') choice = await popMenu(x, y, coverItems, { title: t('Cover'), from: el });
     }
-    // the ↻ on the cover, for the keyboard and screen readers
-    if (!script) options.push({ label: t('New cover'), value: 'refresh' });
-    options.push(
-      { label: t('Set word goal…'), desc: t('Adds the subtle progress bar to the cover.'), value: 'goal' },
-      { label: t('Remove from bookshelf'), desc: t('Takes it off your shelves. The files stay safe in your NEO Library folder on disk.'), value: 'remove' },
-      window.Capacitor
-        ? { label: t('Delete book'), desc: t('Moves the book folder to Deleted Books in your NEO Library, where you can recover it.'), danger: true, value: 'trash' }
-        : {
-          label: navigator.platform.toLowerCase().includes('win') ? t('Move to Recycle Bin') : t('Move to Trash'),
-          desc: t('Sends the book folder to your system trash, where you can recover it.'),
-          danger: true, value: 'trash'
-        }
-    );
-    const choice = await optionModal(`“${escHtml(meta.title)}”`, null, options);
     if (choice === 'part') {
       await addPage(home, 'part', meta.id);
+    } else if (choice === 'duplicate') {
+      await duplicateBook(meta);
     } else if (choice === 'refresh') {
       await refreshCover(meta, el);
     } else if (choice === 'export' && script) {
-      const fmt = await optionModal(t('Export “{title}”', { title: escHtml(meta.title) }), null, [
-        ...(window.Capacitor ? [] : [{ label: 'PDF (.pdf)', value: 'pdf' }]),
+      const fmt = await optionModal(t('Export “{title}”', { title: escHtml(shownTitle(meta.title)) }), null, [
+        { label: 'PDF (.pdf)', value: 'pdf' },
         { label: 'Fountain (.fountain)', value: 'fountain' }, { label: 'Final Draft (.fdx)', value: 'fdx' }
       ]);
       if (!fmt) return;
       await openBook(meta.id);
       await doExport(fmt);
     } else if (choice === 'export') {
-      const fmt = await optionModal(t('Export “{title}”', { title: escHtml(meta.title) }), null, [
-        { label: t('Text (.txt)'), value: 'txt' }, { label: t('Markdown (.md)'), value: 'md' }, { label: t('HTML (.html)'), value: 'html' },
-        ...(window.Capacitor ? [] : [{ label: 'PDF (.pdf)', value: 'pdf' }]),
-        { label: t('Word (.docx)'), value: 'docx' }, { label: t('EPUB (.epub)'), value: 'epub' }
+      const fmt = await optionModal(t('Export “{title}”', { title: escHtml(shownTitle(meta.title)) }), null, [
+        ...(moreOn() ? [{ label: t('Text (.txt)'), value: 'txt' }, { label: t('Markdown (.md)'), value: 'md' }, { label: t('HTML (.html)'), value: 'html' }] : []),
+        { label: 'PDF (.pdf)', value: 'pdf' },
+        { label: t('Word (.docx)'), value: 'docx' }, { label: t('EPUB (.epub)'), value: 'epub' },
+        ...(window.Capacitor || isPageMeta(meta) ? [] : [{ label: t('Paperback for KDP…'), value: 'paperback' }])
       ]);
       if (!fmt) return;
-      if (window.Capacitor) {
+      if (window.Capacitor || fmt === 'paperback') {
         await openBook(meta.id);
         await doExport(fmt);
       } else {
@@ -1848,18 +2079,11 @@ function bookTile(meta, opts = {}) {
       meta.coverImage = null;
       await writeBookMeta(meta.id, meta);
       renderShelves();
-    } else if (choice === 'goal') {
-      const goal = await askInput(t('Word count goal for “{title}”', { title: escHtml(meta.title) }), t('e.g. 80000 — blank removes the goal'),
-        meta.wordGoal ? String(meta.wordGoal) : '');
-      if (goal === null) return;
-      meta.wordGoal = parseInt(goal, 10) || 0;
-      await writeBookMeta(meta.id, meta);
-      renderShelves();
     } else if (choice === 'remove') {
       for (const s of library.shelves) s.bookIds = s.bookIds.filter((b) => b !== meta.id);
       await writeLibrary(library);
       renderShelves();
-      toast(t('“{title}” removed from the shelves — its files are still in your NEO Library', { title: meta.title }));
+      toast(t('“{title}” removed from the shelves — its files are still in your NEO Library', { title: shownTitle(meta.title) }));
     } else if (choice === 'trash') {
       const ok = await window.neo.deleteBook(meta.id, meta.title);
       if (ok) {
@@ -1870,6 +2094,42 @@ function bookTile(meta, opts = {}) {
     }
   });
   return el;
+}
+
+// A copy of the whole book beside it on the shelf, titled as a copy; the
+// writer renames it (or keeps it as a backup). The open book's unsaved
+// words go to disk first, so the copy has them.
+async function duplicateBook(meta) {
+  if (book && book.id === meta.id) {
+    await Promise.all(book.chapterOrder.filter((c) => chapterHTML[c] !== undefined && chapterHTML[c] !== savedHTML[c]).map((c) => persistChapter(c)));
+    flushAllSaves();
+    await saveMeta();
+    await new Promise((resolve) => setTimeout(resolve, 300)); // notes and sidecars, written alongside
+  }
+  let copy;
+  try {
+    copy = await window.neo.duplicateBook(meta.id, t('{title} (copy)', { title: meta.title }));
+  } catch (err) {
+    window.neo.logError('duplicate: ' + (err && err.stack || err));
+    toast(t('Couldn’t copy the book: {error}', { error: plainError(err) }), 8000);
+    return;
+  }
+  bookMetaCache.set(copy.id, copy);
+  // beside the original; a title in a bound book gets its copy on a shelf
+  // of its own, so the bound book doesn't print the story twice
+  let shelf = library.shelves.find((x) => x.bookIds.includes(meta.id)) || library.shelves[0];
+  if (isBound(shelf)) {
+    const bound = shelf;
+    shelf = library.shelves.find((x) => !isBound(x) && x.authorId === bound.authorId) || library.shelves.find((x) => !isBound(x));
+    if (!shelf) {
+      shelf = { id: 'shelf-' + Date.now().toString(36), name: t('Copies'), bookIds: [], ...(bound.authorId ? { authorId: bound.authorId } : {}) };
+      library.shelves.push(shelf);
+    }
+    shelf.bookIds.push(copy.id);
+  } else shelf.bookIds.splice(shelf.bookIds.indexOf(meta.id) + 1, 0, copy.id);
+  await writeLibrary(library);
+  renderShelves();
+  toast(t('Made a copy: “{title}”', { title: copy.title }));
 }
 
 // The cover as a picture file: the writer's own image just as they gave it;
@@ -1912,8 +2172,11 @@ function paintable(meta) {
   return false; // done, shelved, or failed: the ↻ on the tile is the way back in
 }
 
+// What a painting reads: the story alone (its chapters, prologue and
+// epilogue). The copyright, dedication, acknowledgments and about pages
+// carry the writer's name and the book's, and stay on this computer.
 function bookPlainText() {
-  return book.chapterOrder.map((id) => chapterText(id)).join('\n\n');
+  return book.chapterOrder.filter((id) => isStory(id)).map((id) => chapterText(id)).join('\n\n');
 }
 
 // Paint the open book, or a book on the shelf (text is read from disk then).
@@ -1935,9 +2198,10 @@ async function requestPaint(meta, text) {
     const m = await window.neo.readBookMeta(meta.id);
     const parts = [];
     for (const chId of (m && m.chapterOrder) || []) {
+      if (!isStory(chId, m)) continue; // (the story alone, as bookPlainText)
       const holder = document.createElement('div');
       holder.innerHTML = await window.neo.readChapter(meta.id, chId);
-      holder.querySelectorAll('.darling-anchor, .ph-mark, .ghost').forEach((n) => n.remove());
+      holder.querySelectorAll(UNCOUNTED).forEach((n) => n.remove());
       parts.push(holder.innerText);
     }
     text = parts.join('\n\n');
@@ -1983,7 +2247,8 @@ async function refreshCover(meta, el) {
   const mode = coverMode(meta);
   const enough = (meta.wordCount || 0) >= PAINT_AT;
   // a bound book's cover has no text of its own to paint from
-  const hasKey = meta.kind !== 'cover' && await window.neo.hasSecret(coverProvider());
+  // (painting is behind Show More Features; a painting already made still shows)
+  const hasKey = meta.kind !== 'cover' && moreOn() && await window.neo.hasSecret(coverProvider());
   const options = [];
   if (meta.coverImage && mode !== 'image') options.push({ label: t('Show your cover art'), desc: t('The image you gave this book.'), value: 'image' });
   if (hasPainting(meta) && mode !== 'painted') options.push({ label: t('Show NEO’s painting'), desc: t('The cover painted from the text.'), value: 'painted' });
@@ -1995,7 +2260,7 @@ async function refreshCover(meta, el) {
       : { label: t('Paint a cover from the text'), desc: t('Once the story passes {n} words.', { n: PAINT_AT }), value: 'nope' });
   }
   // a plain abstract with nothing else to offer just re-rolls
-  const choice = options.length === 1 ? 'reroll' : await optionModal(t('Cover for “{title}”', { title: escHtml(meta.title) }), null, options);
+  const choice = options.length === 1 ? 'reroll' : await optionModal(t('Cover for “{title}”', { title: escHtml(shownTitle(meta.title)) }), null, options);
   if (!choice || choice === 'nope') return;
   const live = (book && book.id === meta.id) ? book : meta;
   if (choice === 'paint') {
@@ -2163,7 +2428,7 @@ async function moveBookToAuthor(bookId, authorId) {
   await writeBookMeta(bookId, meta);
   await writeLibrary(library);
   renderShelves();
-  toast(t('“{title}” now sits on {name}’s top shelf — Esc puts it back', { title: meta.title, name: target.name }), 6000);
+  toast(t('“{title}” now sits on {name}’s top shelf — Esc puts it back', { title: shownTitle(meta.title), name: target.name }), 6000);
 }
 async function undoShelfMove() {
   const m = lastShelfMove;
@@ -2176,7 +2441,7 @@ async function undoShelfMove() {
   if (meta) { meta.author = m.author; await writeBookMeta(m.bookId, meta); }
   await writeLibrary(library);
   renderShelves();
-  toast(t('“{title}” is back where it was', { title: m.title }));
+  toast(t('“{title}” is back where it was', { title: shownTitle(m.title) }));
   return true;
 }
 document.addEventListener('keydown', (e) => {
@@ -2216,7 +2481,8 @@ $('#author-chip').onclick = async () => {
     }
   }
   opts.push({ label: t('Rename {name}', { name: escHtml(cur.name) }), value: 'rename' });
-  opts.push({ label: t('Add a pen name…'), desc: t('A separate set of shelves under another name'), value: 'add' });
+  // a second name is behind Show More Features; names already made stay reachable
+  if (moreOn()) opts.push({ label: t('Add a pen name…'), desc: t('A separate set of shelves under another name'), value: 'add' });
   if (library.authors.length > 1) {
     opts.push({
       label: t('Remove {name}', { name: escHtml(cur.name) }),
@@ -2264,6 +2530,7 @@ $('#author-chip').onclick = async () => {
 
 let openGeneration = 0;
 async function openBook(bookId) {
+  diskWordsAt = Date.now();
   // a book being exported from the shelf finishes first (it borrows the
   // open book's place for the moment it takes)
   while (shelfExport) await new Promise((r) => setTimeout(r, 50));
@@ -2290,8 +2557,12 @@ async function openBook(bookId) {
   tabPlaces = {}; // a fresh book starts with fresh places
   book = meta;
   if (lock && !lock.locked) startBookLock(bookId);
+  showWindowTitle();
+  snapShown = null;
+  snapCache = null;
+  sideCardsKey = '';
   currentChapterId = null; // never carry a chapter reference across books
-  undoStack = [];
+  undoStack = []; redoStack = [];
   chapterHTML = html;
   savedHTML = { ...html };
   for (const chId of Object.keys(html)) knowDisk(bookId, chId, html[chId]);
@@ -2309,6 +2580,7 @@ async function openBook(bookId) {
   document.execCommand('defaultParagraphSeparator', false, 'p');
 
   $('#tp-title').textContent = isUntitled(book.title) ? '' : book.title;
+  showTitleStyle();
   $('#tp-subtitle').textContent = book.subtitle || '';
   $('#tp-author').textContent = book.author || t('Anonymous');
   $$('.tab[data-tab="notes"]')[0].textContent = tabName('notes');
@@ -2438,7 +2710,7 @@ function renderChapters() {
     // screen readers name each chapter by its heading (a lone chapter by the book)
     body.setAttribute('role', 'textbox');
     body.setAttribute('aria-multiline', 'true');
-    if (chId === solo) body.setAttribute('aria-label', book.title || t('The story'));
+    if (chId === solo) body.setAttribute('aria-label', book.title ? shownTitle(book.title) : t('The story'));
     else body.setAttribute('aria-labelledby', head.id);
     body.spellcheck = false; // NEO runs its own spellcheck pass
     if (!story) body.classList.add('no-cap');
@@ -2481,17 +2753,20 @@ function renderChapters() {
     healStrayNbsp(body);
     wireChapterBody(body, chId);
   });
+  if (nbspMarksEnabled) paintNonBreakingMarks();
   if (isScript()) {
     // the pages are counted before the pane lists the scenes; again once
     // Courier Prime has arrived, in case the first count was in another face
     spRepaginate();
     if (document.fonts) document.fonts.load('1em "Courier Prime"').then(() => spSchedule(0)).catch(() => {});
   }
+  applyPaged();
+  renderAllFootnoteLists();
   renderNav();
 }
 
-async function deleteChapterToDarlings(chId) {
-  snapshotStructure('chapter delete');
+async function deleteChapterToDarlings(chId, quiet = false) {
+  if (!quiet) snapshotStructure('chapter delete');
   const kind = chapterKind(chId);
   const name = chapterName(chId);
   const index = book.chapterOrder.indexOf(chId);
@@ -2508,12 +2783,16 @@ async function deleteChapterToDarlings(chId) {
     });
     await writeSidecar(book.id, 'darlings', darlings);
   }
+  const noted = isStory(chId) && await notesPageToDarlings(chId, kind === 'chapter' ? t('deleted Chapter {n}', { n: chapterNumber(chId) }) : name);
+  if (noted) await writeSidecar(book.id, 'darlings', darlings);
   if (currentChapterId === chId) currentChapterId = null;
   await deleteChapterQuiet(chId);
-  if (text) {
+  if (text && !quiet) {
     toast(kind === 'chapter'
       ? t('Chapter removed — its words are in Darlings, or {key} to undo', { key: KZ })
       : t('{name} removed — its words are in Darlings, or {key} to undo', { name, key: KZ }));
+  } else if (noted && !quiet) {
+    toast(t('Chapter removed — its notes are in Darlings, or {key} to undo', { key: KZ }));
   }
 }
 
@@ -2544,9 +2823,8 @@ async function chapterMenu(chId, x = 0, y = 0, from = null) {
   if (!choice || choice === kind) return null;
   if (choice === 'export') {
     const formats = [
-      { label: t('Text (.txt)'), value: 'txt' }, { label: t('Markdown (.md)'), value: 'md' }, { label: t('HTML (.html)'), value: 'html' },
-      // PDF is made by the desktop app; Pocket shares the others
-      ...(window.Capacitor ? [] : [{ label: 'PDF (.pdf)', value: 'pdf' }]),
+      ...(moreOn() ? [{ label: t('Text (.txt)'), value: 'txt' }, { label: t('Markdown (.md)'), value: 'md' }, { label: t('HTML (.html)'), value: 'html' }] : []),
+      { label: 'PDF (.pdf)', value: 'pdf' },
       { label: t('Word (.docx)'), value: 'docx' }, { label: t('EPUB (.epub)'), value: 'epub' }
     ];
     const fmt = await optionModal(t('Export “{title}”', { title: escHtml(chapterHeading(chId) || chapterName(chId)) }), null, formats);
@@ -2598,6 +2876,11 @@ document.addEventListener('dragstart', () => { dragFromInside = true; }, true);
 document.addEventListener('dragend', () => { dragFromInside = false; }, true);
 document.addEventListener('drop', () => { setTimeout(() => { dragFromInside = false; }, 0); }, true);
 
+// when a real key last went down (not an input method's 229): the characters
+// that follow it by themselves were typed on a key the page already read
+let lastRealKeyAt = 0;
+if (IS_POCKET) document.addEventListener('keydown', (e) => { if (e.keyCode !== 229 && e.key !== 'Unidentified') lastRealKeyAt = Date.now(); }, true);
+
 function wireChapterBody(body, chId) {
   body.addEventListener('focus', () => { currentChapterId = chId; updateCounters(); highlightNav(); });
 
@@ -2623,10 +2906,12 @@ function wireChapterBody(body, chId) {
     chapterHTML[chId] = captureBody(body);
     wordCache[chId] = null;
     scheduleChapterSave(chId);
+    if (nbspMarksEnabled) paintNonBreakingMarks();
     if (spellOn) scheduleSpellRescan(chId, body);
     updateCounters();
     scheduleNavRefresh();
     if (!typewriterEnabled) revealCaret();
+    if (body.querySelector('.fn') || body.parentElement.querySelector(':scope > .fn-list')) queueFootnoteList(null);
     endTypingRunSoon();
   });
   // paste without formatting
@@ -2662,7 +2947,7 @@ function wireChapterBody(body, chId) {
     if (html) {
       document.execCommand('insertHTML', false, cleanPasteHtml(html, { style: dashStyle(), ...edges }));
       // the engine wraps inserted HTML (and its neighbours) in style spans
-      if (body.querySelector('span:not(.ph-mark)')) {
+      if (body.querySelector('span:not(.ph-mark):not(.fn)')) {
         const caret = captureCaret();
         stripJunkSpans(body);
         restoreCaret(caret);
@@ -2679,7 +2964,7 @@ function wireChapterBody(body, chId) {
         const tail = i === parts.length - 1 && !edges.end && !edges.spacedAfter && /\s$/.test(p) ? ' ' : '';
         const line = lead + dialogueDashes(p.trim(), dashStyle(), { start: i > 0 || edges.start, end: i < parts.length - 1 || edges.end, spaced: i === 0 && edges.spaced }) + tail;
         // plain text written in Markdown keeps its *italics* and **bold**
-        const styled = library && library.markdownOff ? null : markdownInline(line);
+        const styled = markdownOff() ? null : markdownInline(line);
         if (styled) {
           document.execCommand('insertHTML', false, styled);
           stripJunkSpans(body); // the engine wraps inserted HTML in style spans
@@ -2691,6 +2976,24 @@ function wireChapterBody(body, chId) {
   let composing = false;
   body.addEventListener('compositionstart', () => { composing = true; });
   body.addEventListener('compositionend', () => { composing = false; });
+  // An Android keyboard (the phone's own, or a Bluetooth one through it) hands
+  // the page its characters as input, not as keys: keydown says keyCode 229
+  // and no key, so the rules for quotes, dashes and capitals never saw them
+  // (#368). Here the same rules run on the character as it arrives. A real
+  // key, which they already had, is left alone.
+  if (IS_POCKET) {
+    body.addEventListener('beforeinput', (e) => {
+      if (e.inputType !== 'insertText' || !e.cancelable || composing || !e.data || [...e.data].length !== 1) return;
+      if (Date.now() - lastRealKeyAt < 150) return;
+      let stopped = false;
+      smartKeys({
+        key: e.data, code: '', keyCode: 0, isComposing: false, metaKey: false, ctrlKey: false, altKey: false, shiftKey: false,
+        get defaultPrevented() { return stopped; },
+        preventDefault() { stopped = true; e.preventDefault(); },
+        stopPropagation() {}
+      }, body);
+    });
+  }
   body.addEventListener('keydown', (e) => {
     // An input method mid-word owns the keys. Its marker (keyCode 229) also
     // rides on Enter with nothing being composed, as on GNOME (Wayland, IBus),
@@ -2749,6 +3052,8 @@ function wireChapterBody(body, chId) {
   body.addEventListener('click', (e) => {
     const mark = e.target.closest('.ph-mark');
     if (mark) focusSticky(mark.dataset.sid);
+    const fn = e.target.closest('.fn');
+    if (fn) openFootnote(fn);
     // clicking a ghost outline note selects it, ready to be replaced with prose
     const ghost = e.target.closest('p.ghost');
     if (ghost) {
@@ -2771,27 +3076,74 @@ function wireChapterBody(body, chId) {
   // the moment writing hits a ghost, it becomes prose
   // (it keeps its data-sec-id so the outline knows it's been written)
   const ghostWas = {}; // each ghost's own words, from before it was written over
-  function writeOverGhost() {
+  // the ghost the caret is in, also when the caret sits between paragraphs
+  // (a click in the margin, the arrow keys) rather than in the ghost's text
+  function ghostAtCaret() {
     const sel = window.getSelection();
-    if (!sel.rangeCount) return;
-    let el = sel.anchorNode;
-    if (el && el.nodeType === Node.TEXT_NODE) el = el.parentElement;
-    const ghost = el && el.closest ? el.closest('p.ghost') : null;
-    if (ghost && body.contains(ghost)) {
-      const secId = ghost.dataset.secId;
-      if (secId && !(secId in ghostWas)) ghostWas[secId] = ghost.textContent;
-      ghost.classList.remove('ghost');
+    if (!sel.rangeCount) return null;
+    const r = sel.getRangeAt(0);
+    const c = r.startContainer;
+    const near = c.nodeType === Node.ELEMENT_NODE ? [c.childNodes[r.startOffset], c.childNodes[r.startOffset - 1], c] : [c];
+    for (const n of near) {
+      const el = n && (n.nodeType === Node.ELEMENT_NODE ? n : n.parentElement);
+      const g = el && el.closest ? el.closest('p.ghost') : null;
+      if (g && body.contains(g)) return g;
     }
+    return null;
+  }
+  // Writing on a ghost replaces it whole, however the caret got there: a
+  // click selects it, and so does any key that types (the arrow keys, Home,
+  // a click in the margin leave the caret inside the note's words, and the
+  // typing was added to them)
+  function selectGhost(ghost) {
+    const sel = window.getSelection();
+    if (sel.rangeCount && !sel.isCollapsed && sel.toString() === ghost.textContent) return;
+    const r = document.createRange();
+    r.selectNodeContents(ghost);
+    sel.removeAllRanges();
+    sel.addRange(r);
+  }
+  function writeOverGhost() {
+    const ghost = ghostAtCaret();
+    if (!ghost) return;
+    const secId = ghost.dataset.secId;
+    if (secId && !(secId in ghostWas)) ghostWas[secId] = ghost.textContent;
+    ghost.classList.remove('ghost');
   }
   body.addEventListener('beforeinput', (e) => {
     // undo and redo give words back; they don't write
     if (e.inputType && e.inputType.startsWith('history')) return;
+    const ghost = ghostAtCaret();
+    if (ghost && e.inputType === 'insertText' && e.cancelable && typeof e.data === 'string') {
+      const sel = window.getSelection();
+      if (!(sel.rangeCount && !sel.isCollapsed && sel.toString() === ghost.textContent)) {
+        // the typed letters take the ghost's place, the caret after them
+        e.preventDefault();
+        writeOverGhost();
+        ghost.textContent = e.data;
+        const r = document.createRange();
+        r.selectNodeContents(ghost);
+        r.collapse(false);
+        sel.removeAllRanges();
+        sel.addRange(r);
+        body.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: e.data }));
+        return;
+      }
+    }
+    if (ghost && e.inputType && e.inputType.startsWith('insert')) selectGhost(ghost);
     writeOverGhost();
   });
   // NEO's own typing aids (smart quotes, capitals) write without a
-  // beforeinput: a key that types a letter over a ghost makes it prose first
+  // beforeinput: a key that types a letter over a ghost selects it whole and
+  // makes it prose first (an input method's first key reads Process)
   body.addEventListener('keydown', (e) => {
-    if (e.key && e.key.length === 1 && !e.metaKey && !e.ctrlKey && !e.isComposing) writeOverGhost();
+    if (e.metaKey || e.ctrlKey || e.isComposing) return;
+    const types = (e.key && e.key.length === 1) || e.key === 'Process' || e.keyCode === 229;
+    if (!types) return;
+    const ghost = ghostAtCaret();
+    if (!ghost) return;
+    selectGhost(ghost);
+    writeOverGhost();
   }, true);
   // …and when undo brings a ghost's words back, the ghost comes back with
   // them: the class isn't part of the engine's undo, so it follows the text
@@ -2834,7 +3186,7 @@ function focusChapterStart(chId) {
 
 // The caret at the last character of a chapter, inside its last paragraph,
 // with the view kept where the writer is — not thrown to the chapter's top
-function focusChapterEnd(chId) {
+function focusChapterEnd(chId, reveal = true) {
   const nb = document.querySelector(`.chapter[data-id="${chId}"] .chapter-body`);
   if (!nb) return;
   if (!nb.isContentEditable) { showEntry(chId); return; }
@@ -2861,7 +3213,7 @@ function focusChapterEnd(chId) {
   s.addRange(nr);
   currentChapterId = chId;
   highlightNav();
-  revealCaret();
+  if (reveal) revealCaret();
 }
 
 // Backspace in an empty chapter deletes it:
@@ -2873,14 +3225,15 @@ function emptyChapterBackspace(e, body, chId) {
   e.preventDefault();
   snapshotStructure('empty chapter removed');
   breakRun++;
+  const was = caretHeight();
   if (idx > 0) {
     const prev = book.chapterOrder[idx - 1];
-    deleteChapterQuiet(chId).then(() => { focusChapterEnd(prev); resetNativeUndo(); });
+    deleteChapterQuiet(chId).then(() => { focusChapterEnd(prev); resetNativeUndo(); keepCaretHeight(was); });
   } else {
     // an empty chapter 1 dissolves too — the caret lands at the top of
     // what just became the new chapter 1
     const next = book.chapterOrder[1];
-    deleteChapterQuiet(chId).then(() => { focusChapterStart(next); resetNativeUndo(); });
+    deleteChapterQuiet(chId).then(() => { focusChapterStart(next); resetNativeUndo(); keepCaretHeight(was); });
   }
   return true;
 }
@@ -2903,6 +3256,21 @@ function styleKeepScroll(e) {
   return true;
 }
 
+// the piece of a chapter's text (one page's worth) nearest a point
+function nearestPageText(x, y) {
+  let best = null;
+  for (const body of document.querySelectorAll('#chapters .chapter-body')) {
+    if (!body.isContentEditable) continue;
+    for (const rect of body.getClientRects()) {
+      const dx = Math.max(rect.left - x, 0, x - rect.right);
+      const dy = Math.max(rect.top - y, 0, y - rect.bottom);
+      const d = dx * dx + dy * dy;
+      if (!best || d < best.d) best = { d, body, rect };
+    }
+  }
+  return best;
+}
+
 // A click on the page's empty space puts the caret where it means: below
 // the text, at the end of that chapter; in the margin beside a line, on that
 // line; above the first line, at the start. Margins, the space under the
@@ -2915,6 +3283,26 @@ function caretFromEmptyClick(e) {
   if (!t || !t.closest || t.closest('[contenteditable="true"], input, textarea, button, a, .pop-menu, .ph-mark, #title-page')) return;
   if (t.closest('.chapter-head') && t !== t.closest('.chapter-head')) return; // its number and title answer clicks themselves
   if (!(t.matches('.chapter, .chapter-head, #chapters, #paper, #paper-scroll, #editor-view'))) return;
+  if (document.body.classList.contains('paged')) {
+    // cut into pages: the nearest page's text takes the click, margins and gaps included
+    const hit = nearestPageText(e.clientX, e.clientY);
+    if (!hit) return;
+    e.preventDefault();
+    const { body: pageBody, rect: box } = hit;
+    const pageChId = pageBody.closest('.chapter').dataset.id;
+    const px = Math.min(Math.max(e.clientX, box.left + 2), box.right - 2);
+    const py = Math.min(Math.max(e.clientY, box.top + 2), box.bottom - 2);
+    const at = document.caretRangeFromPoint(px, py);
+    if (!at || !pageBody.contains(at.startContainer)) { focusChapter(pageChId); return; }
+    pageBody.focus({ preventScroll: true });
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(at);
+    currentChapterId = pageChId;
+    highlightNav();
+    updateCounters();
+    return;
+  }
   // the chapter whose page this is, or the one just above a gap
   let sec = t.closest('.chapter');
   if (!sec) {
@@ -2929,10 +3317,13 @@ function caretFromEmptyClick(e) {
   const chId = sec.dataset.id;
   e.preventDefault();
   if (e.clientY < box.top) { focusChapterStart(chId); return; }
-  if (e.clientY > box.bottom) { focusChapter(chId); return; }
+  // below the text: the caret at its end, and the page stays where it is
+  // (focusChapter's focus() scrolled up to the chapter's top, a page or two
+  // on a half-empty sheet, #354)
+  if (e.clientY > box.bottom) { focusChapterEnd(chId, false); updateCounters(); return; }
   const x = Math.min(Math.max(e.clientX, box.left + 2), box.right - 2);
   const r = document.caretRangeFromPoint(x, e.clientY);
-  if (!r || !body.contains(r.startContainer)) { focusChapter(chId); return; }
+  if (!r || !body.contains(r.startContainer)) { focusChapterEnd(chId, false); updateCounters(); return; }
   body.focus({ preventScroll: true });
   const s = window.getSelection();
   s.removeAllRanges();
@@ -2960,22 +3351,50 @@ function gotoChapter(step) {
   sec.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
 }
 
+// The caret's line on screen, or null when the caret isn't on the page
+function caretRect() {
+  const sc = $('#paper-scroll');
+  const sel = window.getSelection();
+  if (!sc || !sel.rangeCount || !sc.contains(sel.anchorNode)) return null;
+  const r = sel.getRangeAt(0).cloneRange();
+  r.collapse(false);
+  const rect = r.getBoundingClientRect();
+  if (rect.height) return rect;
+  // an empty line has no text to measure: its paragraph does
+  const node = r.endContainer.nodeType === Node.ELEMENT_NODE ? r.endContainer : r.endContainer.parentElement;
+  return node ? node.getBoundingClientRect() : null;
+}
+
+// A chapter split, merged or taken away redraws the chapters. The writer's
+// line stays at the height it had in the window, so the page doesn't jump:
+// caretHeight() before the change, keepCaretHeight(it) after.
+// (The browser's own scroll anchoring is paused meanwhile: it moves the page
+// to make up for what changed above the window, after NEO has already put
+// the line back, and the page landed a line or two off.)
+function caretHeight() {
+  const sc = $('#paper-scroll');
+  sc.style.overflowAnchor = 'none';
+  clearTimeout(caretHeight.t);
+  caretHeight.t = setTimeout(() => { sc.style.overflowAnchor = ''; }, 3000); // (never left off)
+  const rect = caretRect();
+  return rect ? rect.top - sc.getBoundingClientRect().top : null;
+}
+function keepCaretHeight(was) {
+  const sc = $('#paper-scroll');
+  const rect = caretRect();
+  if (was != null && rect) sc.scrollTop += rect.top - sc.getBoundingClientRect().top - was;
+  // anchoring back on once the page has settled where NEO put it
+  clearTimeout(caretHeight.t);
+  caretHeight.t = setTimeout(() => { sc.style.overflowAnchor = ''; }, 300);
+}
+
 // The caret never types out of sight: an Enter (or anything else) on the
 // window's bottom line brings the new line into view, with a little room
 // below it. (Typewriter scrolling keeps the line centered on its own.)
 function revealCaret() {
   const sc = $('#paper-scroll');
-  const sel = window.getSelection();
-  if (!sc || !sel.rangeCount || !sc.contains(sel.anchorNode)) return;
-  const r = sel.getRangeAt(0).cloneRange();
-  r.collapse(false);
-  let rect = r.getBoundingClientRect();
-  if (!rect.height) {
-    // an empty line has no text to measure: its paragraph does
-    const node = r.endContainer.nodeType === Node.ELEMENT_NODE ? r.endContainer : r.endContainer.parentElement;
-    if (!node) return;
-    rect = node.getBoundingClientRect();
-  }
+  const rect = caretRect();
+  if (!rect) return;
   const box = sc.getBoundingClientRect();
   const room = Math.min(48, box.height / 6);
   if (rect.bottom > box.bottom - room) sc.scrollTop += rect.bottom - (box.bottom - room);
@@ -3022,12 +3441,14 @@ function chapterStartBackspace(e, body, chId) {
     // empty chapter above: swallow it
     snapshotStructure('empty chapter removed');
     breakRun++;
-    deleteChapterQuiet(prevId).then(() => { focusChapterStart(chId); resetNativeUndo(); });
+    const was = caretHeight();
+    deleteChapterQuiet(prevId).then(() => { focusChapterStart(chId); resetNativeUndo(); keepCaretHeight(was); });
     return true;
   }
   // chapter with words above: merge this chapter up into it — the inverse
   // of a triple-Enter split, and ⌘Z restores the split
   snapshotStructure('chapters merged');
+  const was = caretHeight();
   const prevCount = prevBody.querySelectorAll('p').length;
   const keepScroll = $('#paper-scroll').scrollTop;
   chapterHTML[prevId] = captureBody(prevBody) + captureBody(body);
@@ -3036,6 +3457,7 @@ function chapterStartBackspace(e, body, chId) {
   writeSidecar(book.id, 'stickies', stickies);
   for (const d of darlings) if (d.chapterId === chId) d.chapterId = prevId;
   writeSidecar(book.id, 'darlings', darlings);
+  foldNotesPage(chId, prevId);
   if (book.sectionNotes && book.sectionNotes[chId]) {
     book.sectionNotes[prevId] = [...(book.sectionNotes[prevId] || []), ...book.sectionNotes[chId]];
     delete book.sectionNotes[chId];
@@ -3061,6 +3483,7 @@ function chapterStartBackspace(e, body, chId) {
   renderStickies();
   restoreCaret({ chId: prevId, pIdx: prevCount, off: 0, scroll: keepScroll });
   resetNativeUndo();
+  keepCaretHeight(was); // the line stays put as the heading above it goes
   breakRun++;
   return true;
 }
@@ -3198,7 +3621,43 @@ function guardMarkerDelete(e, body, chId) {
   const node = r.startContainer;
   const back = e.key === 'Backspace';
   const isMark = (n) => n && n.nodeType === Node.ELEMENT_NODE &&
-    (n.classList.contains('ph-mark') || n.classList.contains('darling-anchor'));
+    (n.classList.contains('ph-mark') || n.classList.contains('darling-anchor') || n.classList.contains('fn'));
+
+  // Case 0: joining two lines where the upper one ends in a footnote's
+  // number. The engine only drops the line's trailing <br> there and leaves
+  // the lines apart, so NEO joins them itself.
+  const block = (node.nodeType === Node.TEXT_NODE ? node.parentElement : node).closest('.chapter-body > p');
+  if (block && !block.classList.contains('scene-break') && !block.classList.contains('ghost')) {
+    const edge = document.createRange();
+    edge.selectNodeContents(block);
+    if (back) edge.setEnd(r.startContainer, r.startOffset); else edge.setStart(r.startContainer, r.startOffset);
+    const upper = back ? block.previousElementSibling : block;
+    const lower = back ? block : block.nextElementSibling;
+    const endsInNote = (p) => {
+      let last = p && p.lastChild;
+      while (last && ((last.nodeType === Node.TEXT_NODE && !last.textContent) || last.nodeName === 'BR')) last = last.previousSibling;
+      return !!(last && last.classList && last.classList.contains('fn'));
+    };
+    if (edge.toString() === '' && !edge.cloneContents().querySelector('.fn') && upper && lower && upper.tagName === 'P' && lower.tagName === 'P' &&
+        !upper.classList.contains('scene-break') && !lower.classList.contains('scene-break') && endsInNote(upper)) {
+      e.preventDefault();
+      while (upper.lastChild && (upper.lastChild.nodeName === 'BR' || (upper.lastChild.nodeType === Node.TEXT_NODE && !upper.lastChild.textContent))) upper.lastChild.remove();
+      const join = document.createRange();
+      join.setStartAfter(upper.lastChild);
+      join.collapse(true);
+      while (lower.firstChild) {
+        if (lower.firstChild.nodeName === 'BR' && !lower.firstChild.nextSibling) { lower.firstChild.remove(); continue; }
+        upper.appendChild(lower.firstChild);
+      }
+      lower.remove();
+      sel.removeAllRanges();
+      sel.addRange(join);
+      caretOffFootnote(sel);
+      syncChapter(body, chId);
+      renderFootnoteList(body);
+      return true;
+    }
+  }
 
   // Case 1: the deletion would cross INTO a marker (caret at a node boundary,
   // marker on the far side) — delete the marker itself, cleanly.
@@ -3213,6 +3672,11 @@ function guardMarkerDelete(e, body, chId) {
     e.preventDefault();
     if (adjacent.classList.contains('ph-mark') && adjacent.dataset.sid) {
       resolveSticky(adjacent.dataset.sid); // removes mark + its note, syncs
+    } else if (adjacent.classList.contains('fn')) {
+      footnoteToDarlings(adjacent, chId);
+      adjacent.remove();
+      syncChapter(body, chId);
+      renderAllFootnoteLists();
     } else {
       adjacent.remove();
       syncChapter(body, chId);
@@ -3244,7 +3708,7 @@ function guardMarkerDelete(e, body, chId) {
 // ("<span style='text-indent...'>"). They corrupt later edits — unwrap them,
 // keeping only NEO's own marks.
 function stripJunkSpans(el) {
-  for (const s of [...el.querySelectorAll('span:not(.ph-mark)')]) {
+  for (const s of [...el.querySelectorAll('span:not(.ph-mark):not(.fn)')]) {
     while (s.firstChild) s.before(s.firstChild);
     s.remove();
   }
@@ -3262,7 +3726,8 @@ let enterRun = 0;
 // recent edits are breaks, ⌘Z routes to NEO's structural undo, one per press
 let breakRun = 0;
 
-function splitChapterAt(body, chId, block, sel) {
+// was: the caret's height in the window before the *** above it went
+function splitChapterAt(body, chId, block, sel, was) {
   // an empty line is no way to start a chapter, or end one: blank lines at
   // the seam stay behind (the new chapter opens on its first words)
   const blank = (p) => p && p.tagName === 'P' && !p.classList.contains('scene-break') && p.textContent.trim() === '' && !p.querySelector('.ph-mark');
@@ -3289,7 +3754,15 @@ function splitChapterAt(body, chId, block, sel) {
   renderChapters();
   focusChapterStart(newId);
   resetNativeUndo();
-  document.querySelector(`.chapter[data-id="${newId}"] p`).scrollIntoView({ block: 'start' });
+  // the writer's line stays where it was in the window, the new chapter's
+  // heading above it; only a line near the window's top moves down, as far
+  // as it takes for the heading to show
+  keepCaretHeight(was);
+  const sc = $('#paper-scroll');
+  const head = document.querySelector(`.chapter[data-id="${newId}"] .chapter-head`).getBoundingClientRect();
+  const top = sc.getBoundingClientRect().top + 8;
+  if (head.height && head.top < top) sc.scrollTop -= top - head.top;
+  revealCaret();
   breakRun++;
 }
 
@@ -3306,7 +3779,7 @@ function handleEnter(e, body, chId) {
   if (!isStory(chId) && !block.classList.contains('poetry')) {
     e.preventDefault();
     enterRun = 0;
-    if (block.querySelector('span:not(.ph-mark)')) {
+    if (block.querySelector('span:not(.ph-mark):not(.fn)')) {
       const caret = captureCaret();
       stripJunkSpans(block);
       restoreCaret(caret);
@@ -3360,8 +3833,9 @@ function handleEnter(e, body, chId) {
         // third Enter: everything from here becomes the next chapter
         e.preventDefault();
         snapshotStructure('chapter split');
+        const was = caretHeight();
         prev.remove();
-        splitChapterAt(body, chId, block, sel);
+        splitChapterAt(body, chId, block, sel, was);
         return true;
       }
       e.preventDefault();
@@ -3386,6 +3860,10 @@ function handleEnter(e, body, chId) {
       sel.addRange(keep);
       syncChapter(body, chId);
       resetNativeUndo();
+      // no input event follows a break made by hand, so the caret is kept in
+      // sight here, as typing keeps it: a break near the window's foot pushed
+      // the line below it until the next key
+      if (!typewriterEnabled) revealCaret();
       breakRun++;
       return true;
     }
@@ -3393,7 +3871,8 @@ function handleEnter(e, body, chId) {
     // normal Enter — native split so ⌘Z keeps working; junk spans (which
     // make the engine clone whole paragraphs) are stripped first if present
     e.preventDefault();
-    if (block.querySelector('span:not(.ph-mark)')) {
+    caretOffFootnote(sel);
+    if (block.querySelector('span:not(.ph-mark):not(.fn)')) {
       // Unwrapping moves text nodes, so preserve the caret's text position.
       const caret = captureCaret();
       stripJunkSpans(block);
@@ -3408,8 +3887,9 @@ function handleEnter(e, body, chId) {
   if (prev && prev.classList.contains('scene-break')) {
     e.preventDefault();
     snapshotStructure('chapter split');
+    const was = caretHeight();
     prev.remove();
-    splitChapterAt(body, chId, block, sel);
+    splitChapterAt(body, chId, block, sel, was);
     return true;
   }
 
@@ -3430,6 +3910,7 @@ function handleEnter(e, body, chId) {
     sel.addRange(range);
     syncChapter(body, chId);
     resetNativeUndo();
+    if (!typewriterEnabled) revealCaret(); // (see the break above)
     breakRun++;
     return true;
   }
@@ -3501,11 +3982,13 @@ function handlePoetry(e, body, chId) {
   const mod = e.metaKey || e.ctrlKey;
   if (!mod && !block.classList.contains('poetry')) return false; // ⇧Enter alone: a flush paragraph
   e.preventDefault();
+  // a new poetry paragraph is behind Show More Features; one already there goes on
+  if (!moreOn() && !block.classList.contains('poetry')) return true;
   if (block.classList.contains('scene-break')) return true;
 
   if (block.classList.contains('poetry')) {
     // the engine's own split keeps the class on the new line, and ⌘Z sees it
-    if (block.querySelector('span:not(.ph-mark)')) stripJunkSpans(block);
+    if (block.querySelector('span:not(.ph-mark):not(.fn)')) stripJunkSpans(block);
     document.execCommand('insertParagraph');
     const cur = caretBlock(body);
     if (cur) {
@@ -3560,7 +4043,7 @@ function handleFlush(e, body, chId) {
   if (!block) return false;
   e.preventDefault();
   if (block.classList.contains('scene-break')) return true;
-  if (block.querySelector('span:not(.ph-mark)')) stripJunkSpans(block);
+  if (block.querySelector('span:not(.ph-mark):not(.fn)')) stripJunkSpans(block);
   if (block.classList.contains('flush')) {
     // the engine's own split keeps the class on the new line, and ⌘Z sees it
     document.execCommand('insertParagraph');
@@ -3659,7 +4142,10 @@ function poetryUnderHeading(body, chId) {
 }
 
 // Backspace just below a *** (or Delete just above one) removes the break
-// itself — prose never merges into the break's styled paragraph
+// itself — prose never merges into the break's styled paragraph. With the
+// caret on the *** line itself, either key removes the whole break too: a
+// break is one thing, so it never joins the line above as three stars of
+// text, and never loses one star at a time.
 function sceneBreakDelete(e, body, chId) {
   if (e.key !== 'Backspace' && e.key !== 'Delete') return false;
   if (e.metaKey || e.ctrlKey || e.altKey) return false;
@@ -3671,6 +4157,23 @@ function sceneBreakDelete(e, body, chId) {
   const block = el && el.closest ? el.closest('p') : null;
   if (!block || !body.contains(block)) return false;
   const back = e.key === 'Backspace';
+  if (block.classList.contains('scene-break')) {
+    // the caret goes where the key was heading: the end of the line above
+    // (Backspace) or the start of the line below (Delete), or the other one
+    // when there's nothing that way
+    const above = block.previousElementSibling;
+    const below = block.nextElementSibling;
+    e.preventDefault();
+    snapshotStructure('section break removed');
+    block.remove();
+    if (back && above) caretToEnd(above);
+    else if (below) caretIntoStart(below);
+    else if (above) caretToEnd(above);
+    syncChapter(body, chId);
+    resetNativeUndo();
+    breakRun++;
+    return true;
+  }
   const edge = document.createRange();
   edge.selectNodeContents(block);
   try {
@@ -3694,8 +4197,26 @@ function captureBody(body) {
   // (a page marks the lines that say who said it, and a chapter the speech
   // after a scene break, for the screen only)
   // (and a script's page breaks, (CONT'D) and suggestions)
-  return body.innerHTML.replace(/<(b|i|em|strong|u|s|strike|sub|sup)\s+style="[^"]*"/g, '<$1').replace(/<p\b[^>]*>/g, (tag) => tag.replace(/ data-(?:attr|speech|first|walk)=""/g, '')
-    .replace(/ data-(?:pg|fill|contd|ghost|ghost-empty|sp-paste)(?:="[^"]*")?/g, ''));
+  return dropJunkSpans(body.innerHTML).replace(/<(b|i|em|strong|u|s|strike|sub|sup)\s+style="[^"]*"/g, '<$1').replace(/<p\b[^>]*>/g, (tag) => tag.replace(/ data-(?:attr|speech|first|walk|fnopen)=""/g, '')
+    .replace(/ data-(?:pg|fill|contd|ghost|ghost-empty|sp-paste|scene-note)(?:="[^"]*")?/g, ''));
+}
+
+// The engine's style spans (stripJunkSpans), left out of what's saved. A
+// cut, Backspace or Delete across paragraphs wraps the words it joins in
+// them (the indent and white-space of the paragraph they came from); taken
+// off the page there and then, they'd break ⌘Z, which puts back what the
+// engine itself took away. So the page keeps them until the chapter is next
+// opened, and the file never has them. NEO's own spans (placeholder flags)
+// stay.
+function dropJunkSpans(html) {
+  if (html.indexOf('<span') < 0) return html;
+  const junk = [];
+  return html.replace(/<span\b[^>]*>|<\/span>/g, (tag) => {
+    if (tag[1] === '/') return junk.pop() ? '' : tag;
+    const drop = !/\sclass="[^"]*\b(?:ph-mark|fn)\b/.test(tag);
+    junk.push(drop);
+    return drop ? '' : tag;
+  });
 }
 
 // A chapter that opens on a line of dialogue sets no drop cap: the dash
@@ -3845,24 +4366,24 @@ function cleanPasteHtml(html, dashes) {
 
   const paras = [[]];
   for (const r of paraRuns(holder.innerHTML)) {
-    if (r.mark !== undefined) { paras[paras.length - 1].push(r); continue; }
+    if (r.mark !== undefined || r.fn !== undefined) { paras[paras.length - 1].push(r); continue; }
     const pieces = r.text.split(BREAK);
     pieces.forEach((text, i) => {
       if (i > 0) paras.push([]);
       if (text) paras[paras.length - 1].push({ text, b: r.b, i: r.i, u: r.u, s: r.s });
     });
   }
-  const filled = paras.map((runs) => runs.some((r) => r.mark === undefined && r.text.trim()));
+  const filled = paras.map((runs) => runs.some((r) => r.mark === undefined && r.fn === undefined && r.text.trim()));
   const out = paras.map((runs, n) => {
     // whitespace collapses like HTML's, and each paragraph is trimmed
-    runs = runs.map((r) => (r.mark !== undefined ? r : { ...r, text: r.text.replace(/\s+/g, ' ') }));
+    runs = runs.map((r) => (r.mark !== undefined || r.fn !== undefined ? r : { ...r, text: r.text.replace(/\s+/g, ' ') }));
     // (one space is kept where the clipboard's words meet the line's own,
     // mid-line: "the " + "big" + " dog" doesn't fuse into "thebigdog")
-    const first = runs.find((r) => r.mark === undefined);
+    const first = runs.find((r) => r.mark === undefined && r.fn === undefined);
     const keepLead = dashes && n === filled.indexOf(true) && !dashes.start && !dashes.spaced;
     const keepTail = dashes && n === filled.lastIndexOf(true) && !dashes.end && !dashes.spacedAfter;
     if (first) first.text = first.text.replace(/^\s+/, keepLead && /^\s/.test(first.text) ? ' ' : '');
-    const last = [...runs].reverse().find((r) => r.mark === undefined);
+    const last = [...runs].reverse().find((r) => r.mark === undefined && r.fn === undefined);
     if (last) last.text = last.text.replace(/\s+$/, keepTail && /\s$/.test(last.text) ? ' ' : '');
     if (dashes) {
       dashRuns(runs, dashes.style, {
@@ -3872,6 +4393,7 @@ function cleanPasteHtml(html, dashes) {
       });
     }
     const inner = runs.map((r) => {
+      if (r.fn !== undefined) return runHtml(r);
       if (r.mark !== undefined) {
         // placeholder marks travel with their text; reconcileMarks pairs
         // each one back up with a note after the paste lands
@@ -3882,7 +4404,7 @@ function cleanPasteHtml(html, dashes) {
       if (!r.text) return '';
       return runHtml(r);
     }).join('');
-    return inner.replace(/<[^>]+>/g, '').trim() ? '<p>' + inner + '</p>' : '';
+    return inner.replace(/<[^>]+>/g, '').trim() || inner.includes('class="fn"') ? '<p>' + inner + '</p>' : '';
   }).filter(Boolean);
   // single block pastes inline (no forced new paragraph)
   if (out.length === 1) return out[0].slice(3, -4);
@@ -3948,7 +4470,7 @@ function selectChars(el, from, to) {
 let mdJustSet = null; // what was just turned into styling, for ⌘Z
 // ~~struck~~ as it's typed: the second closing ~ strikes the words through
 function markdownStrike(e, body, range) {
-  if (library && library.markdownOff) return false;
+  if (markdownOff()) return false;
   if (e.key !== '~' || !range.collapsed) return false;
   if (!body.matches || !body.matches('.chapter-body, #aux-editor')) return false;
   const start = range.startContainer.nodeType === Node.TEXT_NODE ? range.startContainer.parentElement : range.startContainer;
@@ -3976,7 +4498,7 @@ function markdownStrike(e, body, range) {
 }
 function markdownEmphasis(e, body, range) {
   if (markdownStrike(e, body, range)) return true;
-  if (library && library.markdownOff) return false;
+  if (markdownOff()) return false;
   if (e.key !== '*' && e.key !== '_') return false;
   if (!body.matches || !body.matches('.chapter-body, #aux-editor')) return false;
   if (!range.collapsed) return false;
@@ -4253,7 +4775,8 @@ function quoteOpenIn(text, q, straight = '') {
   for (let i = 0; i < text.length; i++) {
     const c = text[i];
     if (straight && c === straight) straights++;
-    else if (c === open && open !== close) depth++;
+    else if (c === open && open === close) depth = depth ? 0 : 1;
+    else if (c === open) depth++;
     else if (c === close) {
       if (close === '’' && /\p{L}/u.test(text[i - 1] || '') && /\p{L}/u.test(text[i + 1] || '')) continue;
       depth = Math.max(0, depth - 1);
@@ -4272,12 +4795,15 @@ const QUOTE_STYLES = {
   fr: { open: '«\u202f', close: '\u202f»' },             // narrow no-break spaces inside
   es: { open: '«', close: '»' },                          // RAE: « » first
   it: { open: '«', close: '»' },
-  de: { open: '„', close: '“' },
+  de: { open: '»', close: '«' },                          // novels: »…« (#353); a book in „…“ keeps it (bookQuotes)
+  'de-CH': { open: '«', close: '»' },                     // Swiss: «…»
   pl: { open: '„', close: '”' },
   ro: { open: '„', close: '”' },
   ru: { open: '«', close: '»' },
   el: { open: '«', close: '»' },
-  hu: { open: '„', close: '”' }
+  hu: { open: '„', close: '”' },
+  sv: { open: '”', close: '”' },
+  ko: { open: '“', close: '”', singles: true }            // ‘…’ inside, as in English
 };
 // The single quotation marks, where ' types them: English and Dutch ‘…’;
 // German ‚…‘, or ›…‹ in a book set in »…«, or ‹…› in Swiss «…» (#286).
@@ -4308,12 +4834,14 @@ function bookQuotes(el) {
   const opens = (text) => {
     const n = (re) => (text.match(re) || []).length;
     const own = q.open.trim();
-    return { '»': n(/»(?=[\p{L}\p{N}])/gu), '«': own === '«' ? 0 : n(/«(?=[\p{L}\p{N}])/gu), own: n(new RegExp(own + '\\s?(?=[\\p{L}\\p{N}])', 'gu')) };
+    return { '»': own === '»' ? 0 : n(/»(?=[\p{L}\p{N}])/gu), '«': own === '«' ? 0 : n(/«(?=[\p{L}\p{N}])/gu), '„': own === '„' ? 0 : n(/„(?=[\p{L}\p{N}])/gu), own: n(new RegExp(own + '\\s?(?=[\\p{L}\\p{N}])', 'gu')) };
   };
   const body = el && el.closest ? el.closest('.chapter-body') : null;
   let c = opens(body ? body.textContent : '');
-  if (!c['»'] && !c['«'] && !c.own && book) c = opens(book.chapterOrder.map((id) => chapterHTML[id] || '').join(' '));
-  if (c['»'] > c.own && c['»'] >= c['«']) return { open: '»', close: '«' };
+  if (!c['»'] && !c['«'] && !c['„'] && !c.own && book) c = opens(book.chapterOrder.map((id) => chapterHTML[id] || '').join(' '));
+  // a German book already written in „…“ keeps its marks
+  if (c['„'] > c.own && c['„'] >= c['»'] && c['„'] >= c['«'] && writingLanguage().toLowerCase().startsWith('de')) return { open: '„', close: '“' };
+  if (c['»'] > c.own && c['»'] >= c['«']) return { open: '»', close: writingLanguage().split('-')[0] === 'sv' ? '»' : '«' };
   if (c['«'] > c.own && c['«'] > c['»']) return { open: '«', close: '»' };
   return q;
 }
@@ -4395,7 +4923,7 @@ const TAB_ORDER = ['manuscript', 'notes', 'outline', 'darlings'];
 window.addEventListener('keydown', (e) => {
   if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
   const cmd = IS_POCKET ? (e.metaKey !== e.ctrlKey) : (IS_MAC ? e.metaKey : e.ctrlKey);
-  if (!cmd || !e.altKey || e.shiftKey || e.isComposing) return;
+  if (!cmd || !e.altKey || e.shiftKey || e.isComposing || !moreOn()) return;
   if ($('#editor-view').hidden || document.querySelector('.modal-backdrop:not([hidden])')) return;
   e.preventDefault();
   e.stopPropagation();
@@ -4426,8 +4954,31 @@ function titleEnter(e) {
   if (first) focusChapter(first);
   else focusChapter(createChapterAt(storyEnd()));
 }
+// A script's title is set in bold, underline or italic as a whole (⌘B, ⌘U,
+// ⌘I on the title page), kept as book.titleStyle and carried into the PDF,
+// Fountain and Final Draft. A book's title page is designed by its exports.
+$('#tp-title').addEventListener('keydown', (e) => {
+  if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
+  const k = ({ KeyB: 'b', KeyU: 'u', KeyI: 'i' })[e.code];
+  if (!k) return;
+  e.preventDefault();
+  if (!book || !isScript()) return;
+  const st = { ...(book.titleStyle || {}) };
+  if (st[k]) delete st[k]; else st[k] = true;
+  if (Object.keys(st).length) book.titleStyle = st; else delete book.titleStyle;
+  showTitleStyle();
+  scheduleMetaSave();
+}, true);
+function showTitleStyle() {
+  const st = (book && isScript() && book.titleStyle) || {};
+  const el = $('#tp-title');
+  el.classList.toggle('tp-b', !!st.b);
+  el.classList.toggle('tp-u', !!st.u);
+  el.classList.toggle('tp-i', !!st.i);
+}
 $('#tp-title').addEventListener('input', () => {
   book.title = $('#tp-title').textContent.trim() || t('Untitled');
+  showWindowTitle();
   scheduleMetaSave();
 });
 $('#tp-subtitle').addEventListener('input', () => {
@@ -4470,8 +5021,17 @@ function isHelpShortcut(e) {
 
 // Global editor shortcuts
 document.addEventListener('keydown', (e) => {
-  if ($('#editor-view').hidden) return;
   if (document.querySelector('.modal-backdrop:not([hidden])')) return; // visible modals own the keyboard
+  // The text-size pair keeps the menu's own keys on the layouts where they
+  // match, and takes over by character where they do not (`+` is Shift+1 on
+  // Swiss German, so CmdOrCtrl-Plus never fires there). It stands before the
+  // editor check: on the shelf the same keys size the covers (#364).
+  if (isLargerTextShortcut(e) || isSmallerTextShortcut(e)) {
+    e.preventDefault();
+    void setEditorFontSize(isLargerTextShortcut(e) ? 1 : -1);
+    return;
+  }
+  if ($('#editor-view').hidden) return;
   const cmd = e.metaKey || e.ctrlKey;
   if (cmd && e.shiftKey && e.code === 'KeyX') {
     e.preventDefault();
@@ -4481,20 +5041,18 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault();
     if (currentTab === 'manuscript') darlingFromKeyboard();
   }
+  if (cmd && e.shiftKey && !e.altKey && e.code === 'KeyN') {
+    e.preventDefault();
+    if (currentTab === 'manuscript' && !fnBox && moreOn()) insertFootnote();
+  }
+  // ⌘S takes a snapshot of the book (SNAPSHOTS)
+  if (cmd && !e.altKey && !e.shiftKey && (e.code === 'KeyS' || e.key === 's')) {
+    e.preventDefault();
+    snapshotNow();
+  }
   if (isSpellcheckShortcut(e)) {
     e.preventDefault();
     toggleSpellcheck();
-  }
-  // The text-size pair keeps the menu's own keys on the layouts where they
-  // match, and takes over by character where they do not (`+` is Shift+1 on
-  // Swiss German, so CmdOrCtrl-Plus never fires there).
-  if (isLargerTextShortcut(e)) {
-    e.preventDefault();
-    void setEditorFontSize(1);
-  }
-  if (isSmallerTextShortcut(e)) {
-    e.preventDefault();
-    void setEditorFontSize(-1);
   }
   if (e.key === 'Escape') {
     // an input method's Esc cancels its own composition, nothing more
@@ -5148,7 +5706,15 @@ function spEighths(lines, perPage = SP_LINES_PER_PAGE) {
 // is forced: ! for action, . for a heading, > for a transition, @ for a name.
 function spToFountain(lines, title = {}) {
   const out = [];
-  const keys = [['Title', title.title], ['Credit', title.credit], ['Author', title.author], ['Draft date', title.draft], ['Contact', title.contact]];
+  // a styled title in Fountain's own marks: **bold**, *italic*, _underline_
+  const st = title.titleStyle || {};
+  let tt = String(title.title || '').trim();
+  if (tt && (st.b || st.i || st.u)) {
+    tt = tt.replace(/([\\*_])/g, '\\$1');
+    if (st.b && st.i) tt = '***' + tt + '***'; else if (st.b) tt = '**' + tt + '**'; else if (st.i) tt = '*' + tt + '*';
+    if (st.u) tt = '_' + tt + '_';
+  }
+  const keys = [['Title', tt], ['Credit', title.credit], ['Author', title.author], ['Draft date', title.draft], ['Contact', title.contact]];
   for (const [k, v] of keys) {
     const s = String(v || '').trim();
     if (!s) continue;
@@ -5269,7 +5835,14 @@ function spFountainTitle(src) {
     if (m) { key = m[1].trim().toLowerCase(); vals[key] = m[2].trim() ? [m[2].trim()] : []; } else if (key) vals[key].push(row.trim());
   }
   const plain = (a) => (a || []).map((r) => spRunsFromFountain(r.replace(/^>\s*|\s*<$/g, '')).map((x) => x.text).join('').trim()).filter(Boolean);
-  if (vals.title) out.title = plain(vals.title).join(' ');
+  if (vals.title) {
+    out.title = plain(vals.title).join(' ');
+    const runs = vals.title.flatMap((r) => spRunsFromFountain(r.replace(/^>\s*|\s*<$/g, ''))).filter((x) => x.text.trim());
+    const all = (k) => runs.length && runs.every((x) => x[k]);
+    const st = {};
+    for (const k of ['b', 'i', 'u']) if (all(k)) st[k] = true;
+    if (Object.keys(st).length) out.titleStyle = st;
+  }
   if (vals.credit) out.credit = plain(vals.credit).join(' ');
   if (vals.author || vals.authors) out.author = plain(vals.author || vals.authors).join(' & ');
   if (vals['draft date'] || vals.date) out.draft = plain(vals['draft date'] || vals.date).join('\n');
@@ -5355,10 +5928,14 @@ function spFromFdx(xml) {
   // writer; lines set left, below them, the contact; set right, the draft
   const title = {};
   const page = (xml.match(/<TitlePage>[\s\S]*?<Content>([\s\S]*?)<\/Content>/) || [])[1] || '';
-  const tp = spFdxParas(page).map((p) => ({ align: p.align, text: p.runs.map((r) => r.text).join('').trim() })).filter((p) => p.text);
+  const tp = spFdxParas(page).map((p) => ({ align: p.align, runs: p.runs, text: p.runs.map((r) => r.text).join('').trim() })).filter((p) => p.text);
   const centered = tp.filter((p) => p.align === 'center').map((p) => p.text);
   if (centered.length) {
     title.title = centered[0];
+    const runs = tp.find((p) => p.align === 'center').runs.filter((r) => r.text.trim());
+    const st = {};
+    for (const k of ['b', 'i', 'u']) if (runs.length && runs.every((r) => r[k])) st[k] = true;
+    if (Object.keys(st).length) title.titleStyle = st;
     const c = centered.findIndex((x, k) => k > 0 && /^(?:written by|screenplay by|teleplay by|story by|by)$/i.test(x));
     if (c > 0) { title.credit = centered[c]; if (centered[c + 1]) title.author = centered[c + 1]; } else if (centered[1]) title.author = centered[1];
   }
@@ -5388,10 +5965,13 @@ function spToFdx(lines, title = {}) {
     newPage = false;
   }
   out += '  </Content>\n';
-  const para = (text, align) => `    <Paragraph Alignment="${align}">\n      <Text>${esc(text)}</Text>\n    </Paragraph>\n`;
+  const para = (text, align, st) => {
+    const style = st ? [st.b && 'Bold', st.i && 'Italic', st.u && 'Underline'].filter(Boolean).join('+') : '';
+    return `    <Paragraph Alignment="${align}">\n      <Text${style ? ` Style="${style}"` : ''}>${esc(text)}</Text>\n    </Paragraph>\n`;
+  };
   const gap = (n) => '    <Paragraph Alignment="Center">\n      <Text></Text>\n    </Paragraph>\n'.repeat(n);
   const tp = [];
-  if (title.title) tp.push(gap(18), para(String(title.title).toUpperCase(), 'Center'));
+  if (title.title) tp.push(gap(18), para(String(title.title).toUpperCase(), 'Center', title.titleStyle));
   if (title.credit) tp.push(gap(1), para(title.credit, 'Center'));
   if (title.author) tp.push(gap(1), para(title.author, 'Center'));
   const rows = (s) => String(s || '').split('\n').map((x) => x.trim()).filter(Boolean);
@@ -5411,7 +5991,7 @@ const SP_NAMES = {
 };
 const spKey = (n) => K('⌘' + n, 'Ctrl+' + n);
 // the screen's own marks on a script's lines, never saved
-const SP_SCREEN_ATTRS = ['data-pg', 'data-fill', 'data-contd', 'data-ghost', 'data-ghost-empty'];
+const SP_SCREEN_ATTRS = ['data-pg', 'data-fill', 'data-contd', 'data-ghost', 'data-ghost-empty', 'data-scene-note'];
 // characters NEO guessed from a line in capitals, and headings it made of
 // INT./EXT.: either goes back to action when the guess turns out wrong
 const spGuessed = new WeakSet();
@@ -5702,6 +6282,15 @@ function spTab(p, back, ghost) {
 // speech makes a parenthetical
 function scriptInput(body) {
   const p = caretBlock(body);
+  // the whole script cleared (⌘A, then Delete or ⌘X): the one line left
+  // starts over as action, the way a new script does, not as whatever the
+  // last line deleted was. Left as dialogue, "int." stayed dialogue and
+  // Return kept to the speech's rules (#359)
+  if (p && body.children.length === 1) {
+    const type = spType(p);
+    const text = p.textContent.trim();
+    if ((type === 'dialogue' || type === 'paren') || (type !== 'action' && type !== 'heading' && (!text || SP_HEAD_RE.test(text)))) spSetClass(p, 'action');
+  }
   if (p) {
     const type = spType(p);
     const text = p.textContent;
@@ -5719,8 +6308,38 @@ function scriptInput(body) {
   spShowElement();
 }
 
+// ---- a scene's card note, in gray on its empty first line ----
+// The way a book's section notes stand on the page until written over: a
+// scene with nothing written under its heading yet shows its note there,
+// gone at the first letter typed. A screen mark (data-scene-note), never
+// saved, and nothing Enter takes. (#339)
+function spSceneNoteGhosts(ps, lines) {
+  const notes = book.sceneNotes || {};
+  const want = new Map();
+  for (let i = 0; i < ps.length; i++) {
+    if (lines[i].type !== 'heading') continue;
+    const note = ps[i].dataset.sceneId && notes[ps[i].dataset.sceneId];
+    if (!note) continue;
+    let j = i + 1;
+    let blank = null;
+    let written = false;
+    for (; j < ps.length && lines[j].type !== 'heading'; j++) {
+      if (ps[j].textContent.trim()) { written = true; break; }
+      if (!blank) blank = ps[j];
+    }
+    if (!written && blank) want.set(blank, note);
+  }
+  for (const p of ps) {
+    const note = want.get(p) || null;
+    if (p.getAttribute('data-scene-note') !== note) { if (note) p.setAttribute('data-scene-note', note); else p.removeAttribute('data-scene-note'); }
+  }
+}
+
 // ---- the gray suggestion at the caret ----
 function spRefreshGhost() {
+  // a scene note on the line being typed on goes the moment it has words
+  const at = spCaretPara();
+  if (at && at.hasAttribute('data-scene-note') && at.textContent.trim()) at.removeAttribute('data-scene-note');
   const p = spCaretPara();
   let ghost = '';
   if (p && document.activeElement === spBodyOf(p) && ['character', 'heading', 'transition'].includes(spType(p)) && spCaretAtEnd(p) && spDismissed.get(p) !== p.textContent) {
@@ -5796,6 +6415,7 @@ function spRepaginate() {
     const fill = a.brk ? String(Math.min(SP_LINES_PER_PAGE, a.fill)) : null;
     if (p.getAttribute('data-fill') !== fill) { if (fill) p.setAttribute('data-fill', fill); else p.removeAttribute('data-fill'); }
   });
+  spSceneNoteGhosts(ps, lines);
   const chapters = $('#chapters');
   chapters.style.setProperty('--sp-last', String(Math.max(0, SP_LINES_PER_PAGE - pg.used)));
   if (narrow) chapters.style.setProperty('--sp-fullw', chapters.clientWidth + 'px');
@@ -5869,7 +6489,7 @@ function spHighlightScene() {
 function spReportState() {
   if (!window.neo.scriptState) return;
   const on = !!book && isScript() && !$('#editor-view').hidden;
-  window.neo.scriptState({ on, element: on ? spShownElement || 'action' : null, underline: on && spUnderlineOn(), contd: on && spContdOn() });
+  window.neo.scriptState({ book: !!book && !$('#editor-view').hidden, on, element: on ? spShownElement || 'action' : null, underline: on && spUnderlineOn(), contd: on && spContdOn() });
 }
 // the Format menu's two script-style items, and Page Break Here
 function spToggleStyle(key) {
@@ -6023,6 +6643,51 @@ function spMoveScene(k, to) {
   renderNav();
 }
 
+// A scene card's Delete: the scene's lines leave the script for Darlings
+// (saved there first), its note goes with it, and ⌘Z puts it all back
+async function deleteSceneToDarlings(cell, quiet = false) {
+  const sc = sceneOfCell(cell);
+  if (!sc || !sc.s.p.isConnected) return;
+  const nodes = sceneNodes(sc.s);
+  const body = spBodyOf(sc.s.p);
+  const chId = body.closest('.chapter').dataset.id;
+  if (!quiet) snapshotStructure('scene delete');
+  const holder = document.createElement('div');
+  for (const n of nodes) holder.appendChild(n.cloneNode(true));
+  const text = nodes.map((n) => n.textContent).join('\n').trim();
+  if (text) {
+    darlings.unshift({
+      id: 'd-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
+      html: captureBody(holder),
+      text: text.slice(0, 2000),
+      chapterId: chId,
+      chapterLabel: sc.s.p.textContent.trim() || t('Scene'),
+      date: new Date().toISOString()
+    });
+    try {
+      await writeSidecar(book.id, 'darlings', darlings);
+    } catch {
+      darlings.shift();
+      toast(t('NEO couldn’t save to Darlings, so the scene stays where it was'));
+      return;
+    }
+    renderDarlings();
+  }
+  for (const n of nodes) n.remove();
+  if (!body.querySelector('p')) body.innerHTML = '<p><br></p>';
+  if (cell.dataset.sid && book.sceneNotes) delete book.sceneNotes[cell.dataset.sid];
+  syncChapter(body, chId);
+  clearTimeout(saveTimers[chId]);
+  persistChapter(chId).then(() => saveMeta())
+    .catch((err) => window.neo.logError('scene delete: ' + (err && err.message || err)));
+  breakRun++;
+  spRepaginate();
+  renderNav();
+  renderBoard();
+  updateCounters();
+  if (text && !quiet) toast(t('Scene removed — its lines are in Darlings, or {key} to undo', { key: KZ }));
+}
+
 // ---- the title page: title, "Written by", the writer, and at the foot
 // the contact (one for the whole library) and the draft ----
 function spTitlePage(on) {
@@ -6101,7 +6766,7 @@ function spPaste(e, body, chId) {
   let lines = null;
   if (html && /class="[^"]*\bsp-|script-body/.test(html)) {
     const doc = new DOMParser().parseFromString(html, 'text/html');
-    lines = [...doc.body.querySelectorAll('p')].map((p) => ({ type: spType(p), html: paraRuns(p.innerHTML, false).filter((r) => r.text).map(runHtml).join('') }));
+    lines = [...doc.body.querySelectorAll('p')].map((p) => ({ type: spType(p), html: paraRuns(p.innerHTML, false).filter((r) => r.text).map((r) => runHtml(r)).join('') }));
   } else if (text && /\n/.test(text.trim())) {
     lines = spFromFountain(text).map((l) => ({ type: l.type, newPage: l.newPage, html: spRunsFromFountain(l.text).map((x) => runHtml(x)).join('') }));
   }
@@ -6168,8 +6833,14 @@ document.addEventListener('beforeinput', (e) => {
     cut.setEnd(r.endContainer, r.endOffset);
     cut.deleteContents();
   }
+  const upperType = spType(upper);
   for (let n = upper; n && n !== lower;) { const next = n.nextElementSibling; n.remove(); n = next; }
   if (!lower.textContent && !lower.querySelector('br')) lower.appendChild(document.createElement('br'));
+  // nothing of the lower line left: the line is the one the selection began
+  // on, and a script cleared whole (⌘A, Delete) starts over as action, as a
+  // new one does. Kept as the last line's dialogue, Return only changed the
+  // element and "int." never became a heading (#359)
+  if (!lower.textContent.trim()) spSetClass(lower, body.children.length === 1 ? 'action' : upperType);
   placeCaret(lower, 0);
   syncChapter(body, chId);
   breakRun++;
@@ -6243,6 +6914,7 @@ async function importScript(r, shelf) {
   meta.format = 'screenplay';
   meta.chapterOrder = [chId];
   meta.credit = tp.credit || t('Written by');
+  if (tp.titleStyle) meta.titleStyle = tp.titleStyle;
   if (tp.draft) meta.draft = tp.draft;
   meta.tabNames = { notes: (library.tabDefaults && library.tabDefaults.notes) || 'Notes', outline: 'Outline' };
   meta.wordCount = parsed.lines.reduce((n, l) => n + countWords(l.runs.map((x) => x.text).join('')), 0);
@@ -6323,7 +6995,7 @@ async function spPdfHtml() {
   const fonts = await spFontFaces();
   const lines2 = (s) => esc(s).replace(/\n/g, '<br>');
   const titlePage = `<div class="page title">
-    <div class="tp-main"><div>${esc(title.toUpperCase())}</div>${credit ? `<div class="gap">${esc(credit)}</div>` : ''}<div class="${credit ? '' : 'gap'}">${esc(book.author || '')}</div></div>
+    <div class="tp-main"><div class="tp-t${['b', 'u', 'i'].filter((k) => (book.titleStyle || {})[k]).map((k) => ' tp-' + k).join('')}">${esc(title.toUpperCase())}</div>${credit ? `<div class="gap">${esc(credit)}</div>` : ''}<div class="${credit ? '' : 'gap'}">${esc(book.author || '')}</div></div>
     <div class="tp-contact">${lines2(library.scriptContact || '')}</div>
     <div class="tp-draft">${lines2(book.draft || '')}</div>
   </div>`;
@@ -6347,6 +7019,7 @@ ${spUnderlineOn() ? 'p.sp-heading { text-decoration: underline; }' : ''}
 .title { text-align: center; }
 .tp-main { position: absolute; top: 3.5in; left: 1.5in; width: 6in; }
 .tp-main .gap { margin-top: 2em; }
+.tp-t.tp-b { font-weight: bold; } .tp-t.tp-u { text-decoration: underline; } .tp-t.tp-i { font-style: italic; }
 .tp-main div + div:not(.gap) { margin-top: 1em; }
 .tp-contact { position: absolute; left: 1.5in; bottom: 1in; width: 3.5in; text-align: left; }
 .tp-draft { position: absolute; right: 1in; bottom: 1in; width: 2.5in; text-align: right; }
@@ -6417,6 +7090,7 @@ function spFountain() {
 function spTitleFields() {
   return {
     title: book.title && !isUntitled(book.title) ? book.title : '',
+    titleStyle: book.titleStyle || null,
     credit: book.credit === undefined ? t('Written by') : book.credit,
     author: book.author || '',
     draft: book.draft || '',
@@ -6464,6 +7138,232 @@ function scriptTile(el, meta) {
   tEl.textContent = title;
   tEl.classList.toggle('long', title.length > 36);
   el.querySelector('.st-author').textContent = meta.author || '';
+}
+
+/* ================================================================== */
+/*  FOOTNOTES                                                          */
+/* ================================================================== */
+// ⌘⇧N (Ctrl+Shift+N) puts a footnote where the caret is: a small number on
+// the page and a box under the line for its words. Enter or Esc goes back
+// to the sentence, just past the number; a click on the number opens it
+// again. The note is kept on its marker in the chapter's own file
+// (<span class="fn" data-note="…">), so it travels with its sentence:
+// cut and paste, undo, sync, Darlings, every export. The numbers are the
+// page's own count (a CSS counter), one series through the whole book as
+// in every export (Paged.js and Word both number that way), and are never
+// saved. Under the chapter's last line its notes are listed, for the
+// screen only. A marker deleted with its words sends them to Darlings.
+const KFN = K('⌘⇧N', 'Ctrl+Shift+N');
+const FN_CHAR = '\u200B';
+let fnBox = null; // the open note: { el, text, mark, body, chId, p }
+
+// A caret just past a footnote's number, held as a place between nodes, is
+// one the engine won't split a line at: it's put at the start of the words
+// that follow (or at the end of the line), the same place to the eye.
+function caretOffFootnote(sel) {
+  if (!sel.rangeCount || !sel.isCollapsed) return;
+  const r = sel.getRangeAt(0);
+  const node = r.startContainer;
+  if (node.nodeType !== Node.ELEMENT_NODE) return;
+  const before = node.childNodes[r.startOffset - 1];
+  if (!before || !before.classList || !before.classList.contains('fn')) return;
+  let next = before.nextSibling;
+  if (!next || next.nodeType !== Node.TEXT_NODE) {
+    next = document.createTextNode('');
+    before.after(next);
+  }
+  const at = document.createRange();
+  at.setStart(next, 0);
+  at.collapse(true);
+  sel.removeAllRanges();
+  sel.addRange(at);
+}
+
+function footnoteMark(note) {
+  const span = document.createElement('span');
+  span.className = 'fn';
+  span.contentEditable = 'false';
+  span.dataset.note = note || '';
+  // one invisible character, so the caret has a place on either side of
+  // it (an empty marker slid onto the next line at Enter)
+  span.textContent = FN_CHAR;
+  return span;
+}
+const footnoteNumber = (mark) => [...document.querySelectorAll('#chapters .chapter-body .fn')].indexOf(mark) + 1 || 1;
+
+function insertFootnote() {
+  const sel = window.getSelection();
+  if (!sel.rangeCount) return;
+  let el = sel.anchorNode;
+  if (el && el.nodeType === Node.TEXT_NODE) el = el.parentElement;
+  const body = el && el.closest ? el.closest('.chapter-body') : null;
+  const p = body && el.closest('.chapter-body > p');
+  if (!body || !p || isScript() || p.classList.contains('ghost') || p.classList.contains('scene-break')) {
+    toast(t('Click into a chapter first, then {key} adds a footnote', { key: KFN }));
+    return;
+  }
+  const chId = body.closest('.chapter').dataset.id;
+  currentChapterId = chId;
+  const range = sel.getRangeAt(0);
+  range.collapse(false);
+  const mark = footnoteMark('');
+  range.insertNode(mark);
+  syncChapter(body, chId);
+  renderAllFootnoteLists();
+  openFootnote(mark);
+}
+
+function openFootnote(mark) {
+  closeFootnote();
+  const body = mark.closest('.chapter-body');
+  const p = mark.closest('.chapter-body > p');
+  if (!body || !p) return;
+  const chId = body.closest('.chapter').dataset.id;
+  // cut into pages, a chapter's sheet is in pieces, and the box sits on the paper instead
+  const host = document.body.classList.contains('paged') ? $('#paper') : body.closest('.chapter');
+  const el = document.createElement('div');
+  el.className = 'fn-box';
+  el.contentEditable = 'false';
+  const num = document.createElement('span');
+  num.className = 'fn-num';
+  num.textContent = footnoteNumber(mark);
+  const text = document.createElement('div');
+  text.className = 'fn-text';
+  text.contentEditable = 'plaintext-only';
+  text.spellcheck = false;
+  text.setAttribute('role', 'textbox');
+  text.setAttribute('aria-label', t('Footnote {n}', { n: num.textContent }));
+  text.dataset.ph = t('Footnote');
+  text.textContent = mark.dataset.note || '';
+  const hint = document.createElement('span');
+  hint.className = 'fn-hint';
+  hint.textContent = t('Enter to go back');
+  el.append(num, text, hint);
+  host.appendChild(el);
+  fnBox = { el, text, mark, body, chId, p };
+  p.setAttribute('data-fnopen', '');
+  placeFootnoteBox();
+  text.addEventListener('keydown', (e) => {
+    if (e.isComposing || e.keyCode === 229) return;
+    if (e.key === 'Enter' || e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeFootnote(true); }
+  });
+  text.addEventListener('input', () => {
+    mark.dataset.note = text.textContent.replace(/\s*\n\s*/g, ' ');
+    syncChapter(body, chId);
+    queueFootnoteList(body);
+    placeFootnoteBox();
+  });
+  text.addEventListener('blur', () => { setTimeout(() => { if (fnBox && fnBox.el === el && !el.contains(document.activeElement)) closeFootnote(false); }, 0); });
+  text.focus();
+  const r = document.createRange();
+  r.selectNodeContents(text);
+  r.collapse(false);
+  window.getSelection().removeAllRanges();
+  window.getSelection().addRange(r);
+}
+
+function placeFootnoteBox() {
+  if (!fnBox || !fnBox.p.isConnected) return;
+  const { el, p, body } = fnBox;
+  const host = el.parentElement;
+  const c = host.getBoundingClientRect();
+  const pieces = p.getClientRects();
+  const r = pieces.length ? pieces[pieces.length - 1] : p.getBoundingClientRect();
+  const b = [...body.getClientRects()].find((x) => r.left >= x.left - 1 && r.right <= x.right + 1 && r.top >= x.top - 1 && r.bottom <= x.bottom + 1) || body.getBoundingClientRect();
+  el.style.left = (b.left - c.left) + 'px';
+  el.style.width = b.width + 'px';
+  body.closest('.chapter').style.setProperty('--fn-h', (el.offsetHeight + 14) + 'px');
+  el.style.top = (r.bottom - c.top + 6) + 'px';
+}
+window.addEventListener('resize', placeFootnoteBox);
+
+// back: the caret goes back into the sentence, just past the number
+function closeFootnote(back = false) {
+  if (!fnBox) return;
+  const { el, mark, body, chId, p } = fnBox;
+  fnBox = null;
+  el.remove();
+  p.removeAttribute('data-fnopen');
+  if (!mark.isConnected) return;
+  const note = (mark.dataset.note || '').trim();
+  mark.dataset.note = note;
+  let after = null;
+  if (back) {
+    after = document.createRange();
+    after.setStartAfter(mark);
+    after.collapse(true);
+  }
+  // a note left empty takes its number away with it: nothing was written
+  if (!note) {
+    if (back) { after.setStartBefore(mark); after.collapse(true); }
+    mark.remove();
+  }
+  syncChapter(body, chId);
+  renderAllFootnoteLists();
+  if (back) {
+    body.focus({ preventScroll: true });
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(after);
+  }
+}
+
+// the chapter's notes, under its last line (screen only)
+const fnListQueue = new Set();
+function queueFootnoteList(body) {
+  // (null: every chapter's, as numbers further on may have moved)
+  if (!fnListQueue.size) requestAnimationFrame(() => { if (fnListQueue.has(null)) renderAllFootnoteLists(); else for (const b of fnListQueue) renderFootnoteList(b); fnListQueue.clear(); });
+  fnListQueue.add(body);
+}
+function renderFootnoteList(body) {
+  if (!body || !body.isConnected) return;
+  const chapter = body.closest('.chapter');
+  const marks = [...body.querySelectorAll('.fn')];
+  let list = chapter.querySelector(':scope > .fn-list');
+  if (!marks.length) { if (list) list.remove(); return; }
+  if (!list) {
+    list = document.createElement('div');
+    list.className = 'fn-list';
+    list.contentEditable = 'false';
+    list.setAttribute('aria-label', t('Footnotes'));
+    body.after(list);
+  }
+  list.innerHTML = '';
+  const before = footnoteNumber(marks[0]) - 1;
+  marks.forEach((mark, i) => {
+    const row = document.createElement('div');
+    row.className = 'fn-row';
+    row.tabIndex = 0;
+    const n = document.createElement('span');
+    n.className = 'fn-n';
+    n.textContent = before + i + 1;
+    const txt = document.createElement('span');
+    txt.textContent = mark.dataset.note || '';
+    row.append(n, txt);
+    const go = () => { mark.scrollIntoView({ behavior: scrollBehavior(), block: 'center' }); openFootnote(mark); };
+    row.addEventListener('click', go);
+    row.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); go(); } });
+    list.appendChild(row);
+  });
+}
+function renderAllFootnoteLists() {
+  for (const body of document.querySelectorAll('.chapter-body')) renderFootnoteList(body);
+}
+
+// a marker deleted with Backspace or Delete: its words go to Darlings
+function footnoteToDarlings(mark, chId) {
+  const note = (mark.dataset.note || '').trim();
+  if (!note) return;
+  darlings.unshift({
+    id: 'd-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
+    html: '<p>' + escHtml(note) + '</p>',
+    text: note.slice(0, 2000),
+    chapterId: chId,
+    chapterLabel: t('Footnote'),
+    date: new Date().toISOString()
+  });
+  writeSidecar(book.id, 'darlings', darlings);
+  toast(t('Footnote removed — its words are in Darlings'));
 }
 
 /* ================================================================== */
@@ -6540,6 +7440,8 @@ function returnToMark(sid) {
 }
 
 function renderStickies() {
+  // the Notes tab's right-hand pane lists them too (not while it's being typed in)
+  if (currentTab === 'notes' && !(document.activeElement && document.activeElement.closest && document.activeElement.closest('#notes-side'))) renderNotesSide();
   const wrap = $('#sticky-list');
   wrap.innerHTML = '';
   const open = stickies.filter((s) => !s.resolved);
@@ -6553,11 +7455,12 @@ function renderStickies() {
     el.className = 'sticky unresolved';
     el.dataset.sid = s.id;
     el.innerHTML = `
-      <div class="s-ch">${chIdx >= 0 ? chapterName(s.chapterId) : t('Unplaced')}</div>
+      <div class="s-ch">${chIdx >= 0 ? escHtml(stickyChapterLabel(s.chapterId)) : t('Unplaced')}</div>
       <textarea placeholder="${t('What needs doing here?')}" spellcheck="false"></textarea>
       <div class="s-actions"><button class="s-go">${t('Go to')}</button><span class="s-sep">·</span><button class="s-done">${t('Resolve')}</button></div>`;
     const ta = el.querySelector('textarea');
     ta.value = s.text;
+    ta.addEventListener('focus', () => markCurrentSticky(s.id));
     ta.addEventListener('input', () => {
       s.text = ta.value;
       scheduleStickiesSave();
@@ -6660,10 +7563,21 @@ function resolveSticky(sid) {
   scheduleNavRefresh();
 }
 
+// the note being worked on stands out in the pane (#351): the one whose
+// mark was just clicked in the text, or whose words are being edited
+function markCurrentSticky(sid) {
+  for (const s of document.querySelectorAll('.sticky.current')) if (s.dataset.sid !== sid) s.classList.remove('current');
+  const el = sid && document.querySelector(`.sticky[data-sid="${sid}"]`);
+  if (el) el.classList.add('current');
+}
+
 function focusSticky(sid) {
   $('#side-pane').classList.add('open');
   const el = document.querySelector(`.sticky[data-sid="${sid}"] textarea`);
-  if (el) el.focus();
+  if (!el) return;
+  markCurrentSticky(sid);
+  el.closest('.sticky').scrollIntoView({ block: 'nearest', behavior: scrollBehavior() });
+  el.focus({ preventScroll: true });
 }
 
 /* ================================================================== */
@@ -6730,7 +7644,7 @@ function renderNav() {
     item.innerHTML = `<div class="n-row" title="${t('Drag to reorder chapters')}"><span class="n-label"></span>
       <span style="display:flex;align-items:center">${story ? `<span class="n-words">${fmtNum(words)}</span>` : ''}${flagged ? `<span class="n-flag" title="${t('Unresolved placeholder')}"></span>` : ''}</span></div>`;
     item.querySelector('.n-label').textContent = chId === solo
-      ? (book.title || t('The story'))
+      ? (book.title ? shownTitle(book.title) : t('The story'))
       : (chTitle ? `${chapterMark(chId)} · ${chTitle}` : chapterName(chId));
 
     // the row is the drag handle, so the note below stays freely editable
@@ -6953,8 +7867,11 @@ function navDropInd() {
   }
   return ind;
 }
+// files from Finder dropped on the pane become chapters where they land
+// (documents dropped in as chapters are behind Show More Features)
+const navFileDrag = (e) => e.dataTransfer.types.includes('Files') && !!book && !isScript() && moreOn();
 navList.addEventListener('dragover', (e) => {
-  if (!e.dataTransfer.types.includes('application/x-neo-chapter')) return;
+  if (!e.dataTransfer.types.includes('application/x-neo-chapter') && !navFileDrag(e)) return;
   e.preventDefault();
   const ind = navDropInd();
   const items = [...navList.querySelectorAll('.nav-item:not(.dragging)')];
@@ -6975,6 +7892,15 @@ navList.addEventListener('dragleave', (e) => {
   if (ind) ind.remove();
 });
 navList.addEventListener('drop', async (e) => {
+  if (e.dataTransfer.files && e.dataTransfer.files.length && navFileDrag(e)) {
+    e.preventDefault();
+    const ind = document.querySelector('.nav-drop-ind');
+    let next = ind ? ind.nextElementSibling : null;
+    while (next && !next.classList.contains('nav-item')) next = next.nextElementSibling;
+    if (ind) ind.remove();
+    await importDroppedChapters(e.dataTransfer.files, next ? next.dataset.id : null);
+    return;
+  }
   const chId = e.dataTransfer.getData('application/x-neo-chapter');
   if (!chId) return;
   e.preventDefault();
@@ -7011,7 +7937,8 @@ function scheduleNavRefresh() {
 function wireHoverPane(hotzone, pane, isPinnable) {
   // (a menu opened from the Chapters pane keeps it open while it's up)
   const pinned = () => (isPinnable && pane.dataset.pinned === '1') ||
-    (pane.id === 'nav-pane' && (chapterDragActive || !!document.querySelector('.pop-menu')));
+    (pane.id === 'nav-pane' && (chapterDragActive || !!document.querySelector('.pop-menu'))) ||
+    (pane.id === 'side-pane' && $('#editor-view').classList.contains('darlings-tab')); // the snapshots stay
   hotzone.addEventListener('mouseenter', (e) => {
     if (e.buttons) return; // dragging something — stand down
     pane.classList.add('open');
@@ -7027,13 +7954,24 @@ function wireHoverPane(hotzone, pane, isPinnable) {
   });
 }
 wireHoverPane($('#nav-hotzone'), $('#nav-pane'), true);
+// a drag from Finder fires no mouseenter: files over the hot zone open the
+// Chapters pane, so they can be dropped between chapters
+$('#nav-hotzone').addEventListener('dragenter', (e) => {
+  if (navFileDrag(e)) $('#nav-pane').classList.add('open');
+});
+$('#nav-pane').addEventListener('dragleave', (e) => {
+  const pane = $('#nav-pane');
+  if (!navFileDrag(e) || pane.dataset.pinned === '1') return;
+  if (e.relatedTarget && (pane.contains(e.relatedTarget) || e.relatedTarget.id === 'nav-hotzone')) return;
+  pane.classList.remove('open');
+});
 wireHoverPane($('#side-hotzone'), $('#side-pane'), true);
 
 // leaving the window closes unpinned panes (they used to stick open)
 function closeUnpinnedPanes() {
   // Wayland can blur the window as a native chapter drag begins.
   if (!chapterDragActive && $('#nav-pane').dataset.pinned !== '1') $('#nav-pane').classList.remove('open');
-  if ($('#side-pane').dataset.pinned !== '1') $('#side-pane').classList.remove('open');
+  if ($('#side-pane').dataset.pinned !== '1' && !$('#editor-view').classList.contains('darlings-tab')) $('#side-pane').classList.remove('open');
 }
 document.documentElement.addEventListener('mouseleave', closeUnpinnedPanes);
 window.addEventListener('blur', closeUnpinnedPanes);
@@ -7072,6 +8010,367 @@ if (!NO_HOVER) {
     if (kept.nav) pinPane('nav', true);
     if (kept.side) pinPane('side', true);
   } catch { /* nothing kept */ }
+}
+
+/* ================================================================== */
+/*  NOTES PAGES — the book's, and one for each chapter                 */
+/* ================================================================== */
+// The Notes tab holds a page for the whole book (notes.html, as it always
+// has) and one for each chapter (notes-<chapter id>.html, on disk once
+// something's written there). It opens on the chapter being written. The
+// left pane lists the pages in the book's order and only turns them; the
+// right one shows what the manuscript already knows about the chapter on
+// the page: its outline note, its open placeholders, the darlings cut from
+// it. Only "Go to" there leaves the tab.
+let notesPage = 'book';
+let notesPeeks = {}; // page → its text, for the left pane
+let notesPeeksBook = '';
+const notesKind = (page) => (page === 'book' ? 'notes' : 'notes-' + page);
+// a chapter's own page is behind Show More Features; one with notes on it
+// already stays open to the writer
+const notesPageOk = (page) => page === 'book' || (!!book && book.chapterOrder.includes(page) && isStory(page) && (moreOn() || !!notesPeeks[page]));
+
+// what a page holds: the text waiting to be saved, else the file
+function readNotesPage(bookId, page) {
+  const pending = auxPending[bookId + '/' + notesKind(page)];
+  return pending ? Promise.resolve(pending.html) : window.neo.readAux(bookId, notesKind(page));
+}
+const htmlText = (html) => {
+  const d = document.createElement('template');
+  d.innerHTML = html || '';
+  d.content.querySelectorAll('p, div, li, br').forEach((n) => n.after('\n'));
+  return (d.content.textContent || '').split('\n').map((s) => s.trim()).filter(Boolean).join('\n');
+};
+
+// the pane's peeks, read once each time the tab opens (a missing page reads as '')
+function loadNotesPeeks() {
+  if (!book) return;
+  const bookId = book.id;
+  const pages = ['book', ...book.chapterOrder.filter((c) => isStory(c))];
+  Promise.all(pages.map((p) => readNotesPage(bookId, p).then((h) => htmlText(h), () => ''))).then((texts) => {
+    if (!book || book.id !== bookId) return;
+    notesPeeks = {};
+    // the page open now goes by what's on it (it may have been typed on
+    // while the others were read)
+    const ed = $('#aux-editor');
+    const open = currentTab === 'notes' && ed.dataset.kind === notesKind(notesPage) ? htmlText(ed.innerHTML) : null;
+    pages.forEach((p, i) => {
+      const text = p === notesPage && open !== null ? open : texts[i];
+      if (p === 'book') notesPeeksBook = text; else notesPeeks[p] = text;
+    });
+    if (currentTab === 'notes') renderNotesNav();
+  });
+}
+
+function notesLabel(chId) {
+  const chTitle = (book.chapterTitles || {})[chId];
+  if (chId === soloStory()) return book.title ? shownTitle(book.title) : t('The story');
+  return chTitle && chapterKind(chId) !== 'unnumbered' ? `${chapterMark(chId)} · ${chTitle}` : stickyChapterLabel(chId);
+}
+
+function notesNavList() {
+  let list = $('#notes-nav');
+  if (list) return list;
+  const head = $('#nav-head > span');
+  if (head && !$('#nav-head .nav-title-notes')) {
+    head.classList.add('nav-title-chapters');
+    const alt = document.createElement('span');
+    alt.className = 'nav-title-notes';
+    head.after(alt);
+  }
+  list = document.createElement('div');
+  list.id = 'notes-nav';
+  $('#nav-list').after(list);
+  return list;
+}
+
+function renderNotesNav() {
+  if (!book) return;
+  const list = notesNavList();
+  $('#nav-head .nav-title-notes').textContent = tabName('notes');
+  list.innerHTML = '';
+  const words = (s) => (s ? countWords(s) : 0);
+  const row = (page, label, text) => {
+    const item = document.createElement('div');
+    item.className = 'nav-item notes-item' + (page === notesPage ? ' current' : '') + (page === 'book' ? ' notes-book' : '');
+    item.dataset.page = page;
+    item.tabIndex = 0;
+    item.setAttribute('role', 'button');
+    const n = words(text);
+    item.innerHTML = `<div class="n-row"><span class="n-label"></span><span style="display:flex;align-items:center">${n ? `<span class="n-words">${fmtNum(n)}</span>` : ''}</span></div><div class="nav-note nav-note-ro"></div>`;
+    item.querySelector('.n-label').textContent = label;
+    if (page !== 'book' && page === currentChapterId) {
+      const dot = document.createElement('span');
+      dot.className = 'notes-here';
+      dot.title = t('The chapter you’re writing');
+      item.querySelector('.n-label').after(dot);
+    }
+    const peek = item.querySelector('.nav-note');
+    if (text) peek.textContent = text.replace(/\n/g, ' ');
+    else { peek.classList.add('blank'); peek.dataset.ph = t('No notes yet'); }
+    const go = () => {
+      openNotesPage(page);
+      // on a phone the pane steps aside for the page
+      if (IS_POCKET && $('#nav-pane').dataset.pinned !== '1') $('#nav-pane').classList.remove('open');
+    };
+    item.addEventListener('click', go);
+    item.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); } });
+    list.appendChild(item);
+  };
+  row('book', t('The Book'), notesPeeksBook);
+  // simple NEO lists only the chapter pages that have notes on them
+  const shown = (chId) => moreOn() || !!notesPeeks[chId];
+  if (!book.chapterOrder.some((c) => isStory(c) && shown(c))) return;
+  const sep = document.createElement('div');
+  sep.className = 'notes-sep';
+  list.appendChild(sep);
+  let parts = 0;
+  for (const chId of book.chapterOrder) {
+    const kind = chapterKind(chId);
+    if (kind === 'part' && moreOn()) {
+      parts += 1;
+      const p = document.createElement('div');
+      p.className = 'notes-part';
+      const title = chapterText(chId).split('\n').map((s) => s.trim()).find(Boolean) || '';
+      p.textContent = title ? `${partLabel(parts)} · ${title}` : partLabel(parts);
+      list.appendChild(p);
+      continue;
+    }
+    if (!isStory(chId) || !shown(chId)) continue;
+    row(chId, notesLabel(chId), notesPeeks[chId] || '');
+  }
+}
+
+// turn to another page without leaving the tab
+function openNotesPage(page) {
+  if (!book || !notesPageOk(page)) page = 'book';
+  if (currentTab === 'notes' && page === notesPage) return;
+  if (currentTab === 'notes') tabPlaces.notes = { scroll: $('#paper-scroll').scrollTop, page: notesPage };
+  notesPage = page;
+  if (currentTab === 'notes') switchTab('notes');
+}
+
+// the page's heading: the book's page as it always was; a chapter's names
+// the chapter, with a way back up to the book's and its outline note below
+function notesHeading() {
+  const aux = $('#aux-paper');
+  let up = $('#notes-up');
+  let line = $('#notes-outline');
+  if (!up) {
+    up = document.createElement('button');
+    up.id = 'notes-up';
+    up.addEventListener('click', () => openNotesPage('book'));
+    $('#aux-title').before(up);
+    line = document.createElement('p');
+    line.id = 'notes-outline';
+    $('#aux-title').after(line);
+  }
+  const chapter = notesPage !== 'book';
+  up.hidden = !chapter;
+  up.textContent = '‹ ' + t('The Book');
+  $('#aux-title').textContent = chapter ? (notesPage === soloStory() ? notesLabel(notesPage) : chapterHeading(notesPage) || notesLabel(notesPage)) : tabName('notes');
+  aux.classList.toggle('notes-chapter', chapter);
+  notesOutlineLine();
+}
+function notesOutlineLine() {
+  const line = $('#notes-outline');
+  if (!line) return;
+  const note = notesPage !== 'book' && currentTab === 'notes' ? ((book.chapterNotes || {})[notesPage] || '').trim() : '';
+  line.hidden = !note;
+  line.innerHTML = '';
+  if (!note) return;
+  const b = document.createElement('b');
+  b.textContent = tabName('outline');
+  line.append(b, document.createTextNode(note));
+}
+
+function notesSideList() {
+  let list = $('#notes-side');
+  if (list) return list;
+  const head = $('#side-head > span');
+  if (head && !$('#side-head .side-title-chnotes')) {
+    head.classList.add('side-title-notes');
+    const alt = document.createElement('span');
+    alt.className = 'side-title-chnotes';
+    head.after(alt);
+  }
+  list = document.createElement('div');
+  list.id = 'notes-side';
+  $('#sticky-list').after(list);
+  return list;
+}
+
+// a line of text from the manuscript, added to the end of the page
+function copyToNotes(text) {
+  const ed = $('#aux-editor');
+  if (currentTab !== 'notes' || ed.contentEditable !== 'true') return;
+  const p = document.createElement('p');
+  p.textContent = text;
+  const last = ed.lastElementChild;
+  if (last && last.tagName === 'P' && !last.textContent.trim()) last.replaceWith(p);
+  else ed.appendChild(p);
+  auxDirty = true;
+  scheduleAuxSave();
+  notesTyped();
+  p.scrollIntoView({ behavior: scrollBehavior(), block: 'nearest' });
+  toast(t('Added to the end of these notes'));
+}
+
+function renderNotesSide() {
+  if (!book || currentTab !== 'notes') return;
+  const list = notesSideList();
+  const chapter = notesPage !== 'book';
+  $('#side-head .side-title-chnotes').textContent = chapter ? t('From this chapter') : t('Across the book');
+  list.innerHTML = '';
+  const label = (text, count) => {
+    const l = document.createElement('div');
+    l.className = 'ns-label';
+    l.innerHTML = '<span></span><span></span>';
+    l.firstChild.textContent = text;
+    l.lastChild.textContent = count ? String(count) : '';
+    list.appendChild(l);
+  };
+  const empty = (text) => {
+    const e = document.createElement('div');
+    e.className = 'ns-empty';
+    e.textContent = text;
+    list.appendChild(e);
+  };
+  const card = (cls, text, actions, meta) => {
+    const c = document.createElement('div');
+    c.className = 'sticky ns-card ' + cls;
+    if (meta) {
+      const m = document.createElement('div');
+      m.className = 's-ch';
+      m.textContent = meta;
+      c.appendChild(m);
+    }
+    const body = document.createElement('div');
+    body.className = 'ns-text';
+    body.textContent = text;
+    c.appendChild(body);
+    const acts = document.createElement('div');
+    acts.className = 's-actions';
+    actions.forEach(([name, fn], i) => {
+      if (i) { const s = document.createElement('span'); s.className = 's-sep'; s.textContent = '·'; acts.appendChild(s); }
+      const b = document.createElement('button');
+      b.textContent = name;
+      b.addEventListener('click', (e) => { e.stopPropagation(); fn(); });
+      acts.appendChild(b);
+    });
+    c.appendChild(acts);
+    list.appendChild(c);
+  };
+  const goTo = (sid) => [t('Go to') + ' ↗', () => returnToMark(sid)];
+  const open = stickies.filter((s) => !s.resolved && book.chapterOrder.includes(s.chapterId));
+
+  if (!chapter) {
+    label(t('Open placeholders'), open.length);
+    if (!open.length) empty(t('None open.'));
+    const order = (s) => book.chapterOrder.indexOf(s.chapterId);
+    for (const s of [...open].sort((a, b) => order(a) - order(b))) {
+      const acts = [goTo(s.id)];
+      if (isStory(s.chapterId)) acts.unshift([t('Chapter notes'), () => openNotesPage(s.chapterId)]);
+      card('unresolved', s.text || t('(no words yet)'), acts, stickyChapterLabel(s.chapterId));
+    }
+    return;
+  }
+
+  // the outline note: the same one the Outline and the Chapters pane show
+  label(t('Outline note'));
+  const oc = document.createElement('div');
+  oc.className = 'sticky ns-card';
+  const note = document.createElement('div');
+  note.className = 'ns-outline';
+  note.contentEditable = 'true';
+  note.spellcheck = false;
+  note.setAttribute('role', 'textbox');
+  note.setAttribute('aria-label', t('Outline note'));
+  note.dataset.ph = t('What happens here…');
+  const chId = notesPage;
+  note.textContent = (book.chapterNotes || {})[chId] || '';
+  note.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === 'Escape') { e.preventDefault(); note.blur(); }
+    e.stopPropagation();
+  });
+  note.addEventListener('input', () => {
+    book.chapterNotes = book.chapterNotes || {};
+    book.chapterNotes[chId] = note.textContent.trim();
+    if (chId === notesPage) notesOutlineLine();
+  });
+  note.addEventListener('blur', () => {
+    book.chapterNotes = book.chapterNotes || {};
+    book.chapterNotes[chId] = note.textContent.trim();
+    scheduleMetaSave();
+    scheduleNavRefresh();
+  });
+  oc.appendChild(note);
+  list.appendChild(oc);
+
+  const here = open.filter((s) => s.chapterId === chId);
+  label(t('Placeholders'), here.length);
+  if (!here.length) empty(t('None open.'));
+  for (const s of here) {
+    card('unresolved', s.text || t('(no words yet)'), [[t('Copy to notes'), () => copyToNotes(s.text)], goTo(s.id)].filter((a, i) => i || s.text));
+  }
+
+  const cut = darlings.filter((d) => d.chapterId === chId && d.text);
+  label(t('Darlings from here'), cut.length);
+  if (!cut.length) empty(t('Nothing cut from this chapter.'));
+  for (const d of cut) card('ns-darling', d.text, [[t('Copy to notes'), () => copyToNotes(d.text)]]);
+}
+
+// typing on a page keeps its peek in the pane up to date
+let notesTypedQueued = false;
+function notesTyped() {
+  const ed = $('#aux-editor');
+  if (currentTab !== 'notes' || !ed.dataset.kind || !ed.dataset.kind.startsWith('notes')) return;
+  if (notesTypedQueued) return;
+  notesTypedQueued = true;
+  setTimeout(() => {
+    notesTypedQueued = false;
+    if (currentTab !== 'notes') return;
+    const text = htmlText(ed.innerHTML);
+    if (notesPage === 'book') notesPeeksBook = text; else notesPeeks[notesPage] = text;
+    if (!document.activeElement || !document.activeElement.closest('#notes-nav')) renderNotesNav();
+  }, 400);
+}
+
+// a chapter folded into another (merged up, or joined in the Outline)
+// brings its notes page along, at the end of the other's. Its own file
+// stays where it is, so ⌘Z gives the chapter back with its notes.
+async function foldNotesPage(fromId, intoId) {
+  if (!book) return;
+  const bookId = book.id;
+  try {
+    const [from, into] = await Promise.all([readNotesPage(bookId, fromId), readNotesPage(bookId, intoId)]);
+    if (!htmlText(from)) return;
+    const html = (into || '') + from;
+    const key = bookId + '/' + notesKind(intoId);
+    auxPending[key] = { bookId, kind: notesKind(intoId), html, inFlight: false };
+    flushAux();
+    if (book && book.id === bookId) notesPeeks[intoId] = htmlText(html);
+  } catch (err) {
+    window.neo.logError('notes fold: ' + (err && err.message || err));
+  }
+}
+
+// a chapter deleted takes its notes page to Darlings, like its words
+async function notesPageToDarlings(chId, label) {
+  try {
+    const html = await readNotesPage(book.id, chId);
+    const text = htmlText(html);
+    if (!text) return false;
+    darlings.push({
+      id: 'd-' + Date.now().toString(36) + 'n',
+      html,
+      text: text.slice(0, 2000),
+      chapterId: null,
+      chapterLabel: t('notes for {name}', { name: label }),
+      date: new Date().toISOString()
+    });
+    return true;
+  } catch { return false; }
 }
 
 /* ================================================================== */
@@ -7316,16 +8615,26 @@ let tabPlaces = {};
 let auxLoad = 0; // which Notes read is the current one
 function switchTab(name) {
   closeCardEditor();
+  closeFootnote();
   auxLoad++;
   $('#editor-view').classList.remove('board-on');
-  sidePaneForTab(name);
+  updateZoomDisplay(); // the page's own zoom, not the cards' (#336)
   const scroller = $('#paper-scroll');
   if (book && currentTab && currentTab !== name) {
     tabPlaces[currentTab] = currentTab === 'manuscript'
       ? { caret: captureCaret(), scroll: scroller.scrollTop }
-      : { scroll: scroller.scrollTop };
+      : { scroll: scroller.scrollTop, page: currentTab === 'notes' ? notesPage : undefined };
   }
+  // Notes opens on the chapter being written (on the book's page from a
+  // page that isn't a chapter); turning its pages is openNotesPage
+  if (book && name === 'notes' && currentTab !== 'notes') {
+    notesPage = currentChapterId && notesPageOk(currentChapterId) ? currentChapterId : 'book';
+    loadNotesPeeks();
+  }
+  if (book && !notesPageOk(notesPage)) notesPage = 'book';
   currentTab = name;
+  sidePaneForTab(name);
+  queueSideCards();
   applyBright();
   $$('.tab').forEach((t) => {
     t.classList.toggle('active', t.dataset.tab === name);
@@ -7337,7 +8646,7 @@ function switchTab(name) {
   const auxEditor = $('#aux-editor');
   const dList = $('#darlings-list');
   const oList = $('#outline-list');
-  const back = tabPlaces[name];
+  const back = name === 'notes' && tabPlaces.notes && tabPlaces.notes.page !== notesPage ? { scroll: 0 } : tabPlaces[name];
   const returnTo = () => { if (back && typeof back.scroll === 'number') scroller.scrollTop = back.scroll; };
 
   // stash whatever aux content was open
@@ -7362,10 +8671,14 @@ function switchTab(name) {
   // the outline's cards, their List/Cards switch and their hint belong to the Outline alone
   for (const id of ['#outline-board', '#outline-views', '#outline-board-hint']) { const el = $(id); if (el) el.hidden = true; }
 
+  snapShown = null;
+  if (window.CSS && CSS.highlights) CSS.highlights.delete('neo-snap-gone');
+  if ($('#snap-view')) { $('#snap-view').hidden = true; $('#snap-view').innerHTML = ''; }
   if (name === 'darlings') {
     $('#aux-title').textContent = t('Darlings');
     dList.hidden = false;
     renderDarlings();
+    renderSnapList();
     returnTo();
     findHere();
   } else if (name === 'outline') {
@@ -7376,7 +8689,7 @@ function switchTab(name) {
     returnTo();
     findHere();
   } else {
-    $('#aux-title').textContent = tabName(name);
+    notesHeading();
     auxEditor.hidden = false;
     // The page waits for its text: nothing typed into the old contents
     // while the file is read can be overwritten by it, and a read that
@@ -7384,14 +8697,16 @@ function switchTab(name) {
     // lands nowhere.
     const bookId = book.id;
     const load = ++auxLoad;
+    const kind = notesKind(notesPage);
     auxEditor.contentEditable = 'false';
     auxEditor.dataset.kind = '';
     auxEditor.dataset.book = '';
-    const pending = auxPending[bookId + '/' + name];
-    (pending ? Promise.resolve(pending.html) : window.neo.readAux(bookId, name)).then((html) => {
-      if (load !== auxLoad || !book || book.id !== bookId || currentTab !== name) return;
+    auxEditor.dataset.ph = notesPage === 'book' ? '' : t('Notes for this chapter');
+    const pending = auxPending[bookId + '/' + kind];
+    (pending ? Promise.resolve(pending.html) : window.neo.readAux(bookId, kind)).then((html) => {
+      if (load !== auxLoad || !book || book.id !== bookId || currentTab !== name || notesKind(notesPage) !== kind) return;
       auxEditor.innerHTML = html || '';
-      auxEditor.dataset.kind = name;
+      auxEditor.dataset.kind = kind;
       auxEditor.dataset.book = bookId;
       auxEditor.contentEditable = 'true';
       auxEditor.focus({ preventScroll: true });
@@ -7535,6 +8850,60 @@ function outlineLine(kind, chId, secId, index, label, text) {
     save();
     if (kind === 'section') syncGhosts(chId);
     renderNav();
+  });
+  // a list pasted (Word, Obsidian, a notes app): a line for each item, as if
+  // typed with Enter and Tab. On a chapter's line the top items are chapters
+  // and the indented ones their sections; on a section's, each is a section (#348)
+  txt.addEventListener('paste', (e) => {
+    const items = pastedOutline(e.clipboardData);
+    if (items.length < 2) {
+      e.preventDefault();
+      document.execCommand('insertText', false, (e.clipboardData.getData('text/plain') || '').replace(/\s+/g, ' '));
+      return;
+    }
+    e.preventDefault();
+    snapshotStructure('outline paste', { outlineFocus: here() });
+    book.sectionNotes = book.sectionNotes || {};
+    book.chapterNotes = book.chapterNotes || {};
+    document.execCommand('insertText', false, items[0].text);
+    save();
+    let focus = here();
+    const touched = new Set([chId]);
+    if (kind === 'section') {
+      const list = book.sectionNotes[chId] || (book.sectionNotes[chId] = []);
+      let at = list.findIndex((x) => x.id === secId) + 1;
+      for (const it of items.slice(1)) {
+        const sec = { id: newSectionId(), text: it.text };
+        list.splice(at++, 0, sec);
+        focus = { secId: sec.id };
+      }
+    } else {
+      let cur = chId; // the chapter the items go after, and their sections into
+      let secAt = 0; // under the line pasted on, ahead of the sections it already has
+      for (const it of items.slice(1)) {
+        if (it.level === 0) {
+          const next = 'ch-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
+          book.chapterOrder.splice(book.chapterOrder.indexOf(cur) + 1, 0, next);
+          cur = next;
+          chapterHTML[cur] = '<p><br></p>';
+          book.chapterNotes[cur] = it.text;
+          persistChapter(cur);
+          secAt = 0;
+          focus = { chId: cur };
+        } else {
+          const list = book.sectionNotes[cur] || (book.sectionNotes[cur] = []);
+          const sec = { id: newSectionId(), text: it.text };
+          list.splice(secAt++, 0, sec);
+          touched.add(cur);
+          focus = { secId: sec.id };
+        }
+      }
+    }
+    scheduleMetaSave();
+    renderChapters();
+    for (const c of touched) syncGhosts(c);
+    updateCounters();
+    renderOutline(focus);
   });
 
   // Enter at the very start of a line that has text makes the new line
@@ -7793,7 +9162,8 @@ function removeGhost(body, p) {
 /*  A script's cards are its scenes (book.sceneNotes holds their notes). */
 /* ================================================================== */
 
-const outlineCardsOn = () => !!book && (isScript() || (library.outlineView || 'cards') === 'cards');
+// (simple NEO's Outline is the list; the cards are behind Show More Features)
+const outlineCardsOn = () => !!book && (isScript() || (moreOn() && (library.outlineView || 'cards') === 'cards'));
 const chapterBodyEl = (chId) => document.querySelector(`.chapter[data-id="${chId}"] .chapter-body`);
 const newSectionId = () => 'sec-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
 
@@ -7843,6 +9213,15 @@ function orderSectionNotes(chId) {
 // desktop set. `library.pageZoom` / `library.cardZoom` stay as the fallback for devices that have
 // not chosen yet, which keeps an existing zoom as the default.
 const PAGE_ZOOM_RANGE = { min: 0.75, max: 3 };
+// The Pages view (Format → Show Pages) lets the page shrink further, so that
+// two fit side by side in a window of any size
+const PAGES_ZOOM_MIN = 0.4;
+let pagedEnabled = false;
+let twoPageEnabled = false;
+let pagesQueued = false;
+const pagesDirty = new Set();
+const pagesOn = () => pagedEnabled && !isScript();
+const pageZoomRange = () => ({ min: pagesOn() ? PAGES_ZOOM_MIN : PAGE_ZOOM_RANGE.min, max: PAGE_ZOOM_RANGE.max });
 const CARD_ZOOM_RANGE = { min: 0.55, max: 1.5 };
 const CARD_ZOOM_KEY = 'neo.cardZoom';
 const pageZoomKey = () => 'neo.pageZoom.' + (isScript() ? 'script' : 'novel');
@@ -7864,13 +9243,164 @@ function rememberZoom(key, value) {
   try { localStorage.setItem(key, String(value)); } catch { /* storage can be off */ }
 }
 
-const activePageZoom = () => readStoredZoom(pageZoomKey(), library.pageZoom || 1, PAGE_ZOOM_RANGE);
+// ---- zoom rules: the interface size steps by a tenth, 90% to 300% ----
+// One rule for every reader: the View menu's commands, the message they send,
+// and a size an older NEO saved between steps (1.25 lands on 1.3). A direction
+// of 0 resets to 100%.
+const UI_ZOOM_RANGE = { min: 0.9, max: 3 };
+function snapZoom(value, fallback = 1) {
+  const n = value === null || value === '' ? NaN : Number(value);
+  const base = Number.isFinite(n) ? n : fallback;
+  return Math.round(Math.min(UI_ZOOM_RANGE.max, Math.max(UI_ZOOM_RANGE.min, base)) * 10) / 10;
+}
+function nextZoomStep(current, direction) {
+  if (direction === 0) return 1;
+  return snapZoom(snapZoom(current) + (direction > 0 ? 0.1 : -0.1));
+}
+// ---- end of zoom rules ----
+
+const activePageZoom = () => readStoredZoom(pageZoomKey(), library.pageZoom || 1, pageZoomRange());
 function applyPageZoom() {
   document.documentElement.style.setProperty('--page-zoom', activePageZoom());
   updateZoomDisplay();
+  fitSpread();
+  queuePages(true);
+}
+
+// ---- Pages view (Format → Show Pages, Two Pages Side by Side) ----
+// The chapters can be shown as separate pages, like a word processor's. The
+// text is the same text: styles.css cuts #chapters into page-high columns.
+// This side decides when that applies (never for a script, which has pages
+// of its own), when two pages fit side by side, and how many pages each
+// chapter runs to, so that its last page is a whole page too.
+const PAGES_GAP = 28; // px between pages at 100%: styles.css --pg-gap-base
+
+// Format → Page Width: the page's width (and its side margins, which give back
+// their room as it widens), for a writer who wants more words to a line (#375).
+// Per device, like the zoom.
+const PAGE_WIDTHS = { regular: { f: 1, pad: 72 }, wide: { f: 1.25, pad: 56 }, wider: { f: 1.5, pad: 40 } };
+function applyPageWidth() {
+  const key = moreOn() && PAGE_WIDTHS[library.pageWidth] ? library.pageWidth : 'regular';
+  const w = PAGE_WIDTHS[key];
+  document.documentElement.style.setProperty('--page-wf', w.f);
+  document.documentElement.style.setProperty('--page-pad-x', w.pad + 'px');
+  if (window.neo.pageWidthState) window.neo.pageWidthState(key);
+  fitSpread();
+  queuePages(true);
+}
+function setPageWidth(value) {
+  if (!PAGE_WIDTHS[value] || value === (library.pageWidth || 'regular')) return;
+  keepReadingPlace(() => { library.pageWidth = value; applyPageWidth(); });
+  writeLibrary(library);
+}
+
+function applyPaged() {
+  fitSpread();
+  if (window.neo.pagesState) window.neo.pagesState({ paged: pagedEnabled, twoUp: twoPageEnabled }); // the Format menu's ticks
+  queuePages(true);
+}
+
+// the width of a page at 100%, as styles.css has it (it follows the window)
+function pageWidthPx() {
+  let probe = $('#pg-probe');
+  if (!probe) {
+    probe = document.createElement('div');
+    probe.id = 'pg-probe';
+    probe.setAttribute('aria-hidden', 'true');
+    probe.style.cssText = 'position:absolute;visibility:hidden;pointer-events:none;height:0;width:var(--page-w)';
+    document.body.appendChild(probe);
+  }
+  return probe.offsetWidth;
+}
+
+// The pages are shown for a book (not a script) when the writer has them on,
+// and two to a row once two fit the window at this zoom
+function fitSpread() {
+  document.body.classList.toggle('paged', pagesOn());
+  let two = false;
+  if (pagesOn() && twoPageEnabled) {
+    const view = $('#editor-view');
+    const room = view.hidden ? 0 : view.clientWidth * 0.94;
+    two = (2 * pageWidthPx() + PAGES_GAP) * activePageZoom() + 24 <= room;
+  }
+  document.body.classList.toggle('pages-two', two);
+}
+
+function queuePages(all, sec) {
+  if (all) pagesDirty.add('*');
+  else if (sec) pagesDirty.add(sec);
+  if (pagesQueued) return;
+  pagesQueued = true;
+  requestAnimationFrame(() => { pagesQueued = false; fitPages(); });
+}
+
+// A chapter's last page is cut short where its words end, and a page the
+// words don't fill should still be a page: tell each chapter how many it
+// runs to (the pieces its text is in), and styles.css sets its height to that.
+function fitPages() {
+  const all = pagesDirty.has('*');
+  const todo = all ? $$('#chapters .chapter') : [...pagesDirty];
+  pagesDirty.clear();
+  if (!document.body.classList.contains('paged')) return;
+  for (const sec of todo) {
+    if (!sec.isConnected) continue;
+    const text = sec.querySelector('.chapter-body:not([hidden])') || sec.querySelector('.toc-list');
+    const n = text ? Math.max(1, text.getClientRects().length) : 1;
+    if (sec.dataset.pg !== String(n)) {
+      sec.dataset.pg = n;
+      sec.style.setProperty('--pg-n', n);
+    }
+  }
+}
+new MutationObserver((records) => {
+  if (!document.body.classList.contains('paged')) return;
+  for (const r of records) {
+    const el = r.target.nodeType === Node.ELEMENT_NODE ? r.target : r.target.parentElement;
+    const sec = el && el.closest ? el.closest('.chapter') : null;
+    if (sec) queuePages(false, sec); else queuePages(true);
+  }
+}).observe($('#chapters'), { childList: true, characterData: true, subtree: true });
+new ResizeObserver(() => { fitSpread(); queuePages(true); }).observe($('#editor-view'));
+window.addEventListener('resize', () => { fitSpread(); queuePages(true); });
+if (document.fonts) document.fonts.addEventListener('loadingdone', () => queuePages(true));
+
+function togglePaged() {
+  pagedEnabled = !pagedEnabled;
+  library.pagedView = pagedEnabled;
+  writeLibrary(library);
+  keepReadingPlace(() => { applyPageZoom(); applyPaged(); });
+}
+function toggleTwoPage() {
+  if (!pagedEnabled) return; // greyed out in the menu until the pages are shown
+  twoPageEnabled = !twoPageEnabled;
+  library.twoPageView = twoPageEnabled;
+  writeLibrary(library);
+  keepReadingPlace(() => applyPaged());
+  if (twoPageEnabled && !document.body.classList.contains('pages-two')) toast(t('Zoom out until two pages fit side by side'));
 }
 
 function cardZoom() { return readStoredZoom(CARD_ZOOM_KEY, library.cardZoom || 1, CARD_ZOOM_RANGE); }
+
+// The shelf has a size of its own (#336): bigger covers without the page's
+// type growing. ⌘+ and ⌘− (Ctrl), a pinch or Ctrl-scroll, and ⌘0 on the
+// shelf, in steps of a tenth, kept on this device.
+const SHELF_ZOOM_KEY = 'neo.shelfZoom';
+const SHELF_ZOOM_RANGE = { min: 0.8, max: 2 };
+const shelfZoom = () => readStoredZoom(SHELF_ZOOM_KEY, 1, SHELF_ZOOM_RANGE);
+const shelfShowing = () => !$('#bookshelf-view').hidden;
+function applyShelfZoom() {
+  const z = shelfZoom();
+  document.documentElement.style.setProperty('--shelf-zoom', z);
+}
+function stepShelfZoom(dir) {
+  const now = shelfZoom();
+  const next = dir === 0 ? 1 : Math.min(SHELF_ZOOM_RANGE.max, Math.max(SHELF_ZOOM_RANGE.min, Math.round((now + dir * 0.1) * 10) / 10));
+  if (next === now) return;
+  rememberZoom(SHELF_ZOOM_KEY, next);
+  applyShelfZoom();
+}
+// a page zoom moves in tenths, so it reads 110%, 120%, never 121%
+const tenth = (z) => Math.round(z * 10) / 10;
 const CARD_ZOOMS = [0.55, 0.7, 0.85, 1, 1.15, 1.3, 1.5];
 function stepCardZoom(dir) {
   const now = cardZoom();
@@ -7900,6 +9430,12 @@ function outlineBoard() {
     if (!cell || e.button !== 0 || cell.classList.contains('open')) return;
     if (e.target.closest('button')) return;
     cardPress(e, { kind: cell.dataset.kind, cell });
+  });
+  // a sweep starts anywhere on the outline page that isn't a card or a control
+  $('#paper-scroll').addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 || e.pointerType !== 'mouse' || !boardShowing()) return;
+    if (e.target.closest('.ob-cell, button, a, input, textarea, select, [contenteditable="true"], .ob-add, #outline-list')) return;
+    cardLasso(e);
   });
   board.addEventListener('contextmenu', (e) => {
     const cell = e.target.closest('.ob-cell');
@@ -7968,7 +9504,7 @@ function viewSwitch() {
 function showOutlineView() {
   const sw = viewSwitch();
   const cards = outlineCardsOn();
-  sw.hidden = !book || isScript(); // a script has only the cards
+  sw.hidden = !book || isScript() || !moreOn(); // a script has only the cards
   for (const b of sw.querySelectorAll('button')) {
     const on = b.dataset.view === (cards ? 'cards' : 'list');
     b.classList.toggle('on', on);
@@ -7984,6 +9520,7 @@ function showOutlineView() {
 function renderBoard() {
   const board = outlineBoard();
   if (!book) return;
+  requestAnimationFrame(showCardSelection);
   closeCardEditor(true);
   board.innerHTML = '';
   const z = cardZoom();
@@ -8238,7 +9775,9 @@ function openCard(cell, { fresh = false } = {}) {
     tools.appendChild(more);
   }
   const tip = document.createElement('span');
-  tip.textContent = t('Enter: done · Tab: next card · {key}: new card', { key: K('⌥Enter', 'Alt+Enter') });
+  tip.textContent = fresh && cell.dataset.kind !== 'loose'
+    ? t('Enter: another new card · Enter on an empty card, or Esc: done')
+    : t('Enter: done · Tab: next card · {key}: new card', { key: K('⌥Enter', 'Alt+Enter') });
   tools.appendChild(tip);
   cell.querySelector('.ob-card').appendChild(tools);
   cardEditor = { cell, text, slug, before: note, slugBefore: slug ? slug.textContent : null, fresh };
@@ -8246,7 +9785,11 @@ function openCard(cell, { fresh = false } = {}) {
   text.addEventListener('blur', cardBlur);
   text.addEventListener('paste', (e) => {
     e.preventDefault();
-    document.execCommand('insertText', false, (e.clipboardData.getData('text/plain') || '').replace(/\s+/g, ' '));
+    const raw = e.clipboardData.getData('text/plain') || '';
+    const items = pastedOutline(e.clipboardData);
+    // a list (from Word, Obsidian, a notes app): one card per line (#348)
+    if (items.length > 1) { pasteOutline(items); return; }
+    document.execCommand('insertText', false, raw.replace(/\s+/g, ' '));
   });
   const first = slug && fresh ? slug : text;
   first.focus();
@@ -8394,6 +9937,15 @@ function cardKeys(e) {
     return;
   }
   if (e.isComposing || e.keyCode === 229) return;
+  // Enter on a new card with words on it: on to another new card, so an
+  // outline can be typed straight through; Enter on an empty one stops
+  // there (the way a list's empty bullet does), and so does Esc (#334)
+  if (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && ed.fresh &&
+      cell.dataset.kind !== 'loose' && (text.textContent.trim() || (ed.slug && ed.slug.textContent.trim()))) {
+    e.preventDefault();
+    newCardAfter(cell);
+    return;
+  }
   // Enter: the card is done (and stays where the keyboard is)
   if (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
     e.preventDefault();
@@ -8446,6 +9998,98 @@ function cardKeys(e) {
       cardEditor = null;
       deleteSectionNote(chId, cell.dataset.sec);
     }
+  }
+}
+
+// A pasted list, one item a line: bullets (-, *, •), numbers (1. 2)) and
+// letters (a.) come off, blank lines go. A line indented more than the
+// list's least indented ones is a level down. (#348)
+// A list as plain text, one item a line. Its marks go: bullets (Word's
+// second and third levels arrive as "o" and "§" before a tab), numbers and
+// letters, Markdown's headings and checkboxes (Obsidian). An item indented
+// past the least indented, or under one of Word's deeper bullets, is a level
+// down.
+function outlineLines(raw) {
+  const items = [];
+  for (const line of String(raw).replace(/\r\n?/g, '\n').split('\n')) {
+    const m = /^([ \t]*)(?:([-*+•◦▪‣·–—])\s+|([o§])\t+|\d{1,3}[.)]\s+|[a-zA-Z][.)]\s+|#{1,6}\s+)?(?:\[[ xX]\]\s+)?(.*)$/.exec(line);
+    const words = (m ? m[4] : line).replace(/\s+/g, ' ').trim();
+    if (!words) continue;
+    const deep = !!m && (!!m[3] || /^[◦▪]$/.test(m[2] || ''));
+    items.push({ indent: (m ? m[1] : '').replace(/\t/g, '    ').length + (deep ? 1000 : 0), text: words });
+  }
+  return outlineLevels(items);
+}
+function outlineLevels(items) {
+  const least = items.length ? Math.min(...items.map((x) => x.indent)) : 0;
+  for (const x of items) x.level = x.indent > least ? 1 : 0;
+  return items;
+}
+// The same list from the HTML a word processor or a web page puts on the
+// clipboard beside the text, where the levels are real: nested <ul>/<ol>, or
+// Word's own list paragraphs (mso-list … level2). Fewer than two items: none.
+function outlineFromHtml(html) {
+  if (!html || !/<li[\s>]|mso-list/i.test(html)) return [];
+  const tpl = document.createElement('template');
+  tpl.innerHTML = html;
+  const root = tpl.content;
+  const items = [];
+  const lis = [...root.querySelectorAll('li')];
+  if (lis.length) {
+    for (const li of lis) {
+      const copy = li.cloneNode(true);
+      copy.querySelectorAll('ul, ol').forEach((x) => x.remove());
+      const text = copy.textContent.replace(/\s+/g, ' ').trim();
+      if (!text) continue;
+      let depth = 0;
+      for (let a = li.parentElement; a; a = a.parentElement) if (a.tagName === 'UL' || a.tagName === 'OL') depth++;
+      items.push({ indent: depth, text });
+    }
+  } else {
+    for (const p of root.querySelectorAll('p')) {
+      const m = /mso-list:\s*\S+\s+level(\d+)/i.exec(p.getAttribute('style') || '');
+      const copy = p.cloneNode(true);
+      copy.querySelectorAll('[style*="mso-list:Ignore" i], [style*="mso-list: Ignore" i]').forEach((x) => x.remove());
+      const text = copy.textContent.replace(/\s+/g, ' ').trim();
+      if (!text) continue;
+      items.push({ indent: m ? +m[1] : 0, text });
+    }
+  }
+  return items.length > 1 ? outlineLevels(items) : [];
+}
+// what was pasted, as a list: the HTML's levels when it has them, else the text's
+function pastedOutline(data) {
+  const fromHtml = outlineFromHtml(data.getData('text/html'));
+  return fromHtml.length > 1 ? fromHtml : outlineLines(data.getData('text/plain') || '');
+}
+
+// The list's first line goes on the open card, and each line after it on a
+// new card of its own, as if typed with Enter. On a chapter card the top
+// lines are chapters and the indented ones their sections; on a section,
+// scene or loose card, every line is another of the same.
+function pasteOutline(items) {
+  const ed = cardEditor;
+  if (!ed) return;
+  const kind = ed.cell.dataset.kind;
+  document.execCommand('insertText', false, items[0].text);
+  for (const it of items.slice(1)) {
+    const cur = cardEditor && cardEditor.cell;
+    if (!cur || !cur.isConnected) break;
+    if (kind === 'loose') { closeCardEditor(); addLooseCard(); }
+    else if (kind === 'chapter' && it.level === 0) {
+      const chId = cur.dataset.ch;
+      closeCardEditor();
+      newChapterCard(book.chapterOrder.indexOf(chId) + 1);
+    } else newCardAfter(cur);
+    const next = cardEditor;
+    if (!next || next.cell === cur) break;
+    next.text.focus();
+    next.text.textContent = it.text;
+    const r = document.createRange();
+    r.selectNodeContents(next.text);
+    r.collapse(false);
+    window.getSelection().removeAllRanges();
+    window.getSelection().addRange(r);
   }
 }
 
@@ -8546,12 +10190,16 @@ function goToCard(cell) {
   if (cell.dataset.kind === 'scene') { goToScene(cell); return; }
   const chId = cell.dataset.ch;
   switchTab('manuscript');
-  if (cell.dataset.kind === 'chapter') {
-    focusChapterStart(chId);
-    document.querySelector(`.chapter[data-id="${chId}"]`)?.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
-    return;
-  }
-  const seg = chapterSegments(chId)[Number(cell.dataset.seg)];
+  if (cell.dataset.kind === 'chapter') { goToChapterTop(chId); return; }
+  goToSegment(chId, chapterSegments(chId)[Number(cell.dataset.seg)]);
+}
+function goToChapterTop(chId) {
+  focusChapterStart(chId);
+  document.querySelector(`.chapter[data-id="${chId}"]`)?.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
+}
+// the caret at a section's first line (a gray ghost selected, ready to be
+// written over), scrolled into view
+function goToSegment(chId, seg) {
   const p = seg && seg.ps[0];
   const body = chapterBodyEl(chId);
   if (!p || !body) { focusChapterStart(chId); return; }
@@ -8568,6 +10216,11 @@ function goToCard(cell) {
 }
 
 async function cardMenu(cell, x, y) {
+  if (cardSel.size > 1 && cardSel.has(cardKey(cell))) {
+    const v = await popMenu(x, y, [{ label: t('Delete {n} cards', { n: cardSel.size }), value: 'delete', danger: true }], { from: cell });
+    if (v === 'delete') await deleteSelectedCards();
+    return;
+  }
   const chId = cell.dataset.ch;
   if (cell.dataset.kind === 'chapter') { await chapterMenu(chId, x, y, cell); return; }
   if (cell.dataset.kind === 'loose') {
@@ -8580,9 +10233,11 @@ async function cardMenu(cell, x, y) {
     const v = await popMenu(x, y, [
       { label: t('Go to the page'), value: 'go' },
       '-',
-      { label: t('Delete the note'), value: 'delete', danger: true, disabled: !cell.dataset.sid }
+      { label: t('Delete the note'), value: 'delete', disabled: !cell.dataset.sid },
+      { label: t('Delete scene'), value: 'deleteScene', danger: true }
     ], { from: cell });
     if (v === 'go') goToScene(cell);
+    else if (v === 'deleteScene') await deleteSceneToDarlings(cell);
     else if (v === 'delete') {
       snapshotStructure('scene note removed');
       delete book.sceneNotes[cell.dataset.sid];
@@ -8596,17 +10251,59 @@ async function cardMenu(cell, x, y) {
   const choice = await popMenu(x, y, [
     { label: t('Go to the page'), value: 'go', disabled: !!cell.dataset.virtual },
     { label: t('Make it a chapter'), value: 'chapter', disabled: !!cell.dataset.virtual },
-    { label: t('Move to loose cards'), value: 'loose', disabled: written || !linked },
+    { label: t('Move to loose cards'), value: 'loose', disabled: !written && !linked },
     '-',
-    { label: t('Delete the note'), value: 'delete', danger: true, disabled: !linked }
+    { label: t('Delete the note'), value: 'delete', disabled: !linked },
+    { label: t('Delete section'), value: 'deleteSection', danger: true, disabled: !!cell.dataset.virtual || (!written && !linked) }
   ], { from: cell });
   if (choice === 'go') goToCard(cell);
   else if (choice === 'chapter') sectionToChapter(chId, Number(cell.dataset.seg));
-  else if (choice === 'loose') sectionToLoose(chId, Number(cell.dataset.seg));
+  else if (choice === 'loose') sectionToLoose(chId, Number(cell.dataset.seg), cell.dataset.virtual ? cell.dataset.sec : null);
   else if (choice === 'delete') {
     deleteSectionNote(chId, cell.dataset.sec);
     if (written) toast(t('The note is gone; the writing stays on the page'));
+  } else if (choice === 'deleteSection') await deleteSectionToDarlings(chId, Number(cell.dataset.seg));
+}
+
+// A section card's Delete: its writing leaves the manuscript for Darlings
+// (saved there before the chapter is), its note goes, and ⌘Z puts it back
+async function deleteSectionToDarlings(chId, segIdx, quiet = false) {
+  const body = chapterBodyEl(chId);
+  const seg = chapterSegments(chId)[segIdx];
+  if (!body || !seg) return;
+  if (!quiet) snapshotStructure('section delete');
+  const prose = seg.ps.filter((p) => !p.classList.contains('ghost'));
+  if (seg.words) {
+    const holder = document.createElement('div');
+    for (const p of prose) holder.appendChild(p.cloneNode(true));
+    for (const p of holder.querySelectorAll('[data-sec-id]')) p.removeAttribute('data-sec-id');
+    darlings.unshift({
+      id: 'd-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
+      html: captureBody(holder),
+      text: prose.map((p) => p.textContent).join('\n').slice(0, 2000),
+      chapterId: chId,
+      chapterLabel: chapterName(chId),
+      date: new Date().toISOString()
+    });
+    try {
+      await writeSidecar(book.id, 'darlings', darlings);
+    } catch {
+      darlings.shift();
+      toast(t('NEO couldn’t save to Darlings, so the section stays where it was'));
+      return;
+    }
+    renderDarlings();
   }
+  liftSegment(body, seg);
+  if (seg.id) book.sectionNotes[chId] = (book.sectionNotes[chId] || []).filter((s) => s.id !== seg.id);
+  orderSectionNotes(chId);
+  syncChapter(body, chId);
+  clearTimeout(saveTimers[chId]);
+  persistChapter(chId).then(() => saveMeta())
+    .catch((err) => window.neo.logError('section delete: ' + (err && err.message || err)));
+  renderBoard();
+  updateCounters();
+  if (seg.words && !quiet) toast(t('Section removed — its words are in Darlings, or {key} to undo', { key: KZ }));
 }
 
 // ---- moving cards ----
@@ -8741,10 +10438,24 @@ function sectionToChapter(chId, segIdx) {
   if (currentTab === 'outline') renderOutline();
 }
 
-function sectionToLoose(chId, segIdx) {
+// A card set aside for later. A note alone becomes a loose card; a section
+// with writing takes its words along on the card (book.looseCards keeps them
+// as html), out of the manuscript and the counts until it's dragged back.
+function sectionToLoose(chId, segIdx, virtualSec) {
+  if (virtualSec) {
+    const note = sectionNote(chId, virtualSec);
+    if (!note) return;
+    snapshotStructure('card to loose');
+    book.sectionNotes[chId] = book.sectionNotes[chId].filter((s) => s.id !== virtualSec);
+    (book.looseCards = book.looseCards || []).push({ id: 'lc-' + Date.now().toString(36), text: note.text });
+    scheduleMetaSave();
+    renderLooseCards();
+    renderBoard();
+    return;
+  }
   const seg = chapterSegments(chId)[segIdx];
   if (!seg) return;
-  if (seg.words) { toast(t('That section has writing in it. Drag it to another chapter instead.')); return; }
+  if (seg.words) { writtenSectionToLoose(chId, seg); return; }
   const note = seg.id ? sectionNote(chId, seg.id) : null;
   if (!note) return;
   snapshotStructure('card to loose');
@@ -8756,6 +10467,39 @@ function sectionToLoose(chId, segIdx) {
   renderBoard();
 }
 
+async function writtenSectionToLoose(chId, seg) {
+  if (seg.flag) { toast(t('That section has a placeholder in it. Drag it to another chapter instead.')); return; }
+  const body = chapterBodyEl(chId);
+  if (!body) return;
+  snapshotStructure('card to loose');
+  const note = seg.id ? sectionNote(chId, seg.id) : null;
+  const holder = document.createElement('div');
+  for (const p of seg.ps) if (!p.classList.contains('ghost')) holder.appendChild(p.cloneNode(true));
+  for (const p of holder.querySelectorAll('[data-sec-id]')) p.removeAttribute('data-sec-id');
+  const card = { id: 'lc-' + Date.now().toString(36), text: note ? note.text : '', html: captureBody(holder), words: seg.words };
+  (book.looseCards = book.looseCards || []).push(card);
+  // the card that holds the words is on disk before the chapter loses them
+  let stamp = null;
+  try { stamp = await writeBookMeta(book.id, book); } catch (err) { window.neo.logError('section to loose: ' + (err && err.message || err)); }
+  if (typeof stamp !== 'string') {
+    book.looseCards = book.looseCards.filter((c) => c !== card);
+    toast(t('NEO couldn’t save the card, so the section stays where it was'));
+    return;
+  }
+  book.modified = stamp;
+  liftSegment(body, seg);
+  if (seg.id) book.sectionNotes[chId] = book.sectionNotes[chId].filter((s) => s.id !== seg.id);
+  orderSectionNotes(chId);
+  syncChapter(body, chId);
+  clearTimeout(saveTimers[chId]);
+  saveMeta().then(() => persistChapter(chId))
+    .catch((err) => window.neo.logError('section to loose: ' + (err && err.message || err)));
+  renderLooseCards();
+  renderBoard();
+  updateCounters();
+  toast(t('Its words went with it, onto the loose card. Drag it back onto the board to put them in again.'), 6000);
+}
+
 function looseToSection(looseId, to) {
   const card = (book.looseCards || []).find((c) => c.id === looseId);
   const body = chapterBodyEl(to.ch);
@@ -8763,11 +10507,31 @@ function looseToSection(looseId, to) {
   snapshotStructure('loose card placed');
   book.looseCards = book.looseCards.filter((c) => c.id !== looseId);
   const sec = { id: newSectionId(), text: card.text };
-  (book.sectionNotes[to.ch] = book.sectionNotes[to.ch] || []).push(sec);
-  if (sec.text) {
-    const target = to.before == null ? null : chapterSegments(to.ch)[to.before];
-    placeGhost(body, sec, target ? (target.brk || target.ps[0]) : null);
+  const target = to.before == null ? null : chapterSegments(to.ch)[to.before];
+  if (card.html) {
+    // a card that holds writing: its words go back in as a section
+    const holder = document.createElement('div');
+    holder.innerHTML = card.html;
+    const ps = [...holder.children];
+    if (ps.length) {
+      if (sec.text) {
+        ps[0].dataset.secId = sec.id;
+        (book.sectionNotes[to.ch] = book.sectionNotes[to.ch] || []).push(sec);
+      }
+      setSegmentDown(body, ps, null, target);
+    }
+    orderSectionNotes(to.ch);
+    syncChapter(body, to.ch);
+    // the chapter with the words is saved before the card leaves book.json
+    clearTimeout(saveTimers[to.ch]);
+    persistChapter(to.ch).then(() => saveMeta())
+      .catch((err) => window.neo.logError('loose to section: ' + (err && err.message || err)));
+    renderLooseCards();
+    updateCounters();
+    return;
   }
+  (book.sectionNotes[to.ch] = book.sectionNotes[to.ch] || []).push(sec);
+  if (sec.text) placeGhost(body, sec, target ? (target.brk || target.ps[0]) : null);
   orderSectionNotes(to.ch);
   syncChapter(body, to.ch);
   scheduleMetaSave();
@@ -8818,6 +10582,7 @@ async function joinChapter(chId, intoCh) {
   // the words are safe in the other chapter before this one's file goes
   try { await persistChapter(intoCh); } catch (err) { window.neo.logError('join: ' + (err && err.message || err)); return null; }
   if (book.chapterTitles) delete book.chapterTitles[chId];
+  await foldNotesPage(chId, intoCh);
   await deleteChapterQuiet(chId);
   updateCounters();
   return sec.id;
@@ -8830,6 +10595,7 @@ document.addEventListener('touchmove', (e) => { if (cardDrag && cardDrag.live) e
 
 function cardPress(e, src) {
   const touch = e.pointerType !== 'mouse';
+  const pick = e.shiftKey ? 'range' : (IS_MAC ? e.metaKey : e.ctrlKey) ? 'toggle' : null;
   const st = { src, x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, live: false, held: false, timer: null, float: null, target: null };
   cardDrag = st;
   const finish = () => {
@@ -8860,7 +10626,8 @@ function cardPress(e, src) {
     // a press that went nowhere: a click (or, held on a touch screen, the menu)
     const cell = st.src.cell;
     if (held) cardMenu(cell, st.x, st.y);
-    else openCard(cell);
+    else if (pick) selectCard(cell, pick);
+    else { clearCardSelection(); openCard(cell); }
   };
   const cancel = () => finish();
   const esc = (ev) => { if (ev.key === 'Escape' && st.live) { ev.preventDefault(); ev.stopPropagation(); st.target = null; finish(); } };
@@ -8869,6 +10636,117 @@ function cardPress(e, src) {
   window.addEventListener('pointerup', up);
   window.addEventListener('pointercancel', cancel);
   window.addEventListener('keydown', esc, true);
+}
+
+// ---- several cards at once ----
+// ⌘-click (Ctrl-click) adds a card to the selection or takes it out,
+// Shift-click takes the run from the last one picked, and a drag across the
+// board's empty space sweeps up every card it touches. Delete (or the
+// right-click menu) removes them together: their writing goes to Darlings,
+// and one ⌘Z brings them all back. A plain click, or Esc, lets go.
+let cardSel = new Set();
+let cardSelAnchor = null;
+function cardKey(cell) {
+  const d = cell.dataset;
+  if (d.kind === 'loose') return 'l|' + d.loose;
+  if (d.kind === 'scene') return 'n|' + d.scene;
+  if (d.kind === 'chapter') return 'c|' + d.ch;
+  return 's|' + d.ch + '|' + (d.seg || '') + '|' + (d.virtual ? d.sec : '');
+}
+const selectableCells = () => $$('#outline-board .ob-cell:not([data-new]), #loose-list .ob-cell');
+function showCardSelection() {
+  for (const c of selectableCells()) c.classList.toggle('ob-sel', cardSel.has(cardKey(c)));
+}
+function clearCardSelection() {
+  if (!cardSel.size) return;
+  cardSel = new Set();
+  cardSelAnchor = null;
+  showCardSelection();
+}
+function selectCard(cell, how) {
+  closeCardEditor();
+  const key = cardKey(cell);
+  if (how === 'range' && cardSelAnchor) {
+    const cells = selectableCells();
+    const a = cells.findIndex((c) => cardKey(c) === cardSelAnchor);
+    const b = cells.indexOf(cell);
+    if (a >= 0 && b >= 0) for (const c of cells.slice(Math.min(a, b), Math.max(a, b) + 1)) cardSel.add(cardKey(c));
+    else cardSel.add(key);
+  } else if (cardSel.has(key)) cardSel.delete(key);
+  else cardSel.add(key);
+  cardSelAnchor = key;
+  showCardSelection();
+}
+function cardLasso(e) {
+  const x0 = e.clientX;
+  const y0 = e.clientY;
+  const keep = e.shiftKey || e.metaKey || e.ctrlKey ? new Set(cardSel) : new Set();
+  let box = null;
+  const move = (ev) => {
+    if (!box) {
+      if (Math.hypot(ev.clientX - x0, ev.clientY - y0) < 5) return;
+      closeCardEditor();
+      box = document.createElement('div');
+      box.className = 'ob-lasso';
+      document.body.appendChild(box);
+      document.body.classList.add('ob-lassoing');
+    }
+    ev.preventDefault();
+    const ts = window.getSelection();
+    if (ts && !ts.isCollapsed) ts.removeAllRanges(); // a sweep, not a text selection
+    const l = Math.min(x0, ev.clientX), t0 = Math.min(y0, ev.clientY);
+    const r = Math.max(x0, ev.clientX), b = Math.max(y0, ev.clientY);
+    Object.assign(box.style, { left: l + 'px', top: t0 + 'px', width: (r - l) + 'px', height: (b - t0) + 'px' });
+    cardSel = new Set(keep);
+    for (const c of $$('#outline-board .ob-cell:not([data-new])')) {
+      const q = c.querySelector('.ob-card').getBoundingClientRect();
+      if (q.right > l && q.left < r && q.bottom > t0 && q.top < b) cardSel.add(cardKey(c));
+    }
+    showCardSelection();
+  };
+  const up = () => {
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', up);
+    document.body.classList.remove('ob-lassoing');
+    if (box) box.remove();
+    else clearCardSelection(); // a click on the empty board lets go
+  };
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', up);
+}
+// Delete or Backspace with cards picked (not while writing on one)
+document.addEventListener('keydown', (e) => {
+  if (!cardSel.size || !book || currentTab !== 'outline') return;
+  if (e.target && e.target.closest && e.target.closest('[contenteditable="true"], input, textarea')) return;
+  if (e.key === 'Escape') { clearCardSelection(); return; }
+  if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); deleteSelectedCards(); }
+});
+
+async function deleteSelectedCards() {
+  const cells = selectableCells().filter((c) => cardSel.has(cardKey(c)));
+  clearCardSelection();
+  if (!cells.length || !book) return;
+  snapshotStructure('cards delete');
+  const chapters = new Set(cells.filter((c) => c.dataset.kind === 'chapter').map((c) => c.dataset.ch));
+  // a book keeps at least one chapter of its story
+  const stories = book.chapterOrder.filter((c) => isStory(c));
+  if (stories.length && stories.every((c) => chapters.has(c))) chapters.delete(stories[0]);
+  // sections from the last up, so the ones before keep their places; none
+  // from a chapter that's going whole
+  const sections = cells.filter((c) => c.dataset.kind === 'section' && !chapters.has(c.dataset.ch))
+    .sort((a, b) => Number(b.dataset.seg || -1) - Number(a.dataset.seg || -1));
+  for (const c of sections) {
+    if (c.dataset.virtual) deleteSectionNote(c.dataset.ch, c.dataset.sec);
+    else await deleteSectionToDarlings(c.dataset.ch, Number(c.dataset.seg), true);
+  }
+  const scenes = cells.filter((c) => c.dataset.kind === 'scene').sort((a, b) => Number(b.dataset.scene) - Number(a.dataset.scene));
+  for (const c of scenes) await deleteSceneToDarlings(c, true);
+  for (const chId of chapters) await deleteChapterToDarlings(chId, true);
+  for (const c of cells.filter((x) => x.dataset.kind === 'loose')) await removeLooseCard(c.dataset.loose, true);
+  renderLooseCards();
+  if (currentTab === 'outline') renderOutline();
+  updateCounters();
+  toast(t('{n} cards removed — their writing is in Darlings, or {key} to undo', { n: cells.length, key: KZ }), 6000);
 }
 
 function beginCardDrag(st) {
@@ -8887,7 +10765,9 @@ function beginCardDrag(st) {
   st.src.cell.classList.add('ob-lifted');
   document.body.classList.add('ob-dragging');
   // the loose pane opens to take a card
-  if (st.src.kind === 'section' && !st.src.cell.dataset.written && st.src.cell.dataset.sec) $('#side-pane').classList.add('drop-ready');
+  const c = st.src.cell;
+  if ((st.src.kind === 'section' && (c.dataset.written || c.dataset.sec)) || st.src.kind === 'scene' ||
+      (st.src.kind === 'chapter' && canSetChapterAside(c.dataset.ch))) $('#side-pane').classList.add('drop-ready');
 }
 
 function endCardDrag(st) {
@@ -8917,9 +10797,24 @@ function dragOver(st) {
   if (edge) st.scroller = setInterval(() => { sc.scrollTop += edge * 14; st.target = dragTarget(st); showDropCaret(st.target); }, 30);
 }
 
+// the card under the pointer, or the nearest one in its line
+function nearestCard(cells, x, y) {
+  let best = null;
+  let bestD = Infinity;
+  for (const c of cells) {
+    const r = c.getBoundingClientRect();
+    const dy = y < r.top ? r.top - y : y > r.bottom ? y - r.bottom : 0;
+    const dx = x < r.left ? r.left - x : x > r.right ? x - r.right : 0;
+    const d = dy * 3 + dx;
+    if (d < bestD) { bestD = d; best = c; }
+  }
+  return best;
+}
+
 // where a card would land: { cell, side } on the board, or the loose pane
 function dragTarget(st) {
-  const kind = st.src.kind;
+  // a loose card holding a whole chapter goes back in as a chapter
+  const kind = st.src.kind === 'loose' && st.src.cell.dataset.held === 'chapter' ? 'chapter' : st.src.kind;
   const pane = $('#side-pane');
   const pr = pane.getBoundingClientRect();
   const overPane = pane.classList.contains('open') && st.x >= pr.left && st.x <= pr.right && st.y >= pr.top && st.y <= pr.bottom;
@@ -8927,21 +10822,12 @@ function dragTarget(st) {
   if (overPane) return pane.classList.contains('drop-ready') ? { loose: true } : null;
   const cells = [...outlineBoard().querySelectorAll('.ob-cell:not(.ob-lifted):not([data-new])')];
   if (!cells.length) return null;
-  // the card under the pointer, or the nearest one in its line
-  let best = null;
-  let bestD = Infinity;
-  for (const c of cells) {
-    const r = c.getBoundingClientRect();
-    const dy = st.y < r.top ? r.top - st.y : st.y > r.bottom ? st.y - r.bottom : 0;
-    const dx = st.x < r.left ? r.left - st.x : st.x > r.right ? st.x - r.right : 0;
-    const d = dy * 3 + dx;
-    if (d < bestD) { bestD = d; best = c; }
-  }
+  let best = nearestCard(cells, st.x, st.y);
   const r = best.getBoundingClientRect();
   // over the middle of a chapter card: into that chapter (a chapter joins
   // it as a section; a section or loose card goes to its end)
   const middle = st.x > r.left + r.width * 0.25 && st.x < r.right - r.width * 0.25 && st.y >= r.top && st.y <= r.bottom;
-  if (middle && best.dataset.kind === 'chapter' && (kind === 'section' || kind === 'loose' || (kind === 'chapter' && best.dataset.ch !== st.src.cell.dataset.ch))) {
+  if (middle && best.dataset.kind === 'chapter' && (kind === 'section' || kind === 'loose' || (kind === 'chapter' && st.src.kind === 'chapter' && best.dataset.ch !== st.src.cell.dataset.ch))) {
     return { cell: best, side: 'into' };
   }
   let side = st.x < r.left + r.width / 2 ? 'before' : 'after';
@@ -8991,14 +10877,83 @@ function showDropCaret(target) {
   caret.style.height = Math.max(10, r.height - 12) + 'px';
 }
 
+// ---- files dropped on the Outline ----
+// A document from Finder or Explorer goes in as chapters between chapters:
+// before a chapter card (or List line) when it's dropped on that card's left
+// half (the line's top half), otherwise after the chapter the card is in.
+// The caret is the card drag's own.
+const chapterAfter = (chId) => book.chapterOrder[book.chapterOrder.indexOf(chId) + 1] || null;
+function outlineFileTarget(x, y) {
+  if (boardShowing()) {
+    const cells = [...outlineBoard().querySelectorAll('.ob-cell:not([data-new])')];
+    if (!cells.length) return { beforeId: null };
+    const best = nearestCard(cells, x, y);
+    const r = best.getBoundingClientRect();
+    if (best.dataset.kind === 'chapter' && x < r.left + r.width / 2) return { cell: best, side: 'before', beforeId: best.dataset.ch };
+    const run = cells.filter((c) => c.dataset.ch === best.dataset.ch);
+    return { cell: run[run.length - 1], side: 'after', beforeId: chapterAfter(best.dataset.ch) };
+  }
+  const lines = $$('#outline-list .ol-line');
+  if (!lines.length) return { beforeId: null };
+  let best = lines[lines.length - 1];
+  for (const l of lines) if (y < l.getBoundingClientRect().bottom) { best = l; break; }
+  const r = best.getBoundingClientRect();
+  if (!best.classList.contains('ol-section') && y < r.top + r.height / 2) return { line: best, side: 'before', beforeId: best.dataset.chId };
+  const run = lines.filter((l) => l.dataset.chId === best.dataset.chId);
+  return { line: run[run.length - 1], side: 'after', beforeId: chapterAfter(best.dataset.chId) };
+}
+function showFileCaret(target) {
+  if (!target || (!target.cell && !target.line)) { $('#ob-caret')?.remove(); return; }
+  if (target.cell) { showDropCaret(target); $('#ob-caret').style.width = ''; return; }
+  // the List: a line across, above or below the chapter's lines
+  showDropCaret(null);
+  const caret = document.createElement('div');
+  caret.id = 'ob-caret';
+  document.body.appendChild(caret);
+  const r = target.line.getBoundingClientRect();
+  caret.style.left = r.left + 'px';
+  caret.style.width = r.width + 'px';
+  caret.style.height = '3px';
+  caret.style.top = (target.side === 'before' ? r.top - 2 : r.bottom - 1) + 'px';
+}
+const outlineFileDrag = (e) => currentTab === 'outline' && navFileDrag(e);
+$('#paper-scroll').addEventListener('dragover', (e) => {
+  if (!outlineFileDrag(e)) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'copy';
+  showFileCaret(outlineFileTarget(e.clientX, e.clientY));
+});
+$('#paper-scroll').addEventListener('dragleave', (e) => {
+  if (e.relatedTarget && $('#paper-scroll').contains(e.relatedTarget)) return;
+  if (outlineFileDrag(e)) showFileCaret(null);
+});
+$('#paper-scroll').addEventListener('drop', async (e) => {
+  if (!outlineFileDrag(e) || !e.dataTransfer.files || !e.dataTransfer.files.length) return;
+  e.preventDefault();
+  const target = outlineFileTarget(e.clientX, e.clientY);
+  showFileCaret(null);
+  await importDroppedChapters(e.dataTransfer.files, target.beforeId);
+});
+
 function dropCard(src, target) {
   if (!target || !book) return;
+  clearCardSelection(); // the cards picked may stand elsewhere after a move
   const cell = src.cell;
   if (target.loose) {
-    if (src.kind === 'section') sectionToLoose(cell.dataset.ch, Number(cell.dataset.seg));
+    if (src.kind === 'section') sectionToLoose(cell.dataset.ch, Number(cell.dataset.seg), cell.dataset.virtual ? cell.dataset.sec : null);
+    else if (src.kind === 'chapter') chapterToLoose(cell.dataset.ch);
+    else if (src.kind === 'scene') sceneToLoose(cell);
     return;
   }
   const tc = target.cell;
+  // a card holding a chapter: a chapter again, before or after the one it's dropped by
+  if (src.kind === 'loose' && cell.dataset.held === 'chapter') {
+    const at = book.chapterOrder.indexOf(tc.dataset.ch);
+    if (at < 0) return;
+    looseToChapter(cell.dataset.loose, at + (tc.dataset.kind === 'chapter' && target.side === 'before' ? 0 : 1));
+    renderBoard();
+    return;
+  }
   if (target.side === 'into') {
     const into = tc.dataset.ch;
     if (src.kind === 'chapter') { joinChapter(cell.dataset.ch, into).then(() => { if (currentTab === 'outline') renderBoard(); }); return; }
@@ -9241,6 +11196,7 @@ function saveSceneCard(cell, note, slug) {
 function looseToScene(looseId, before) {
   const card = (book.looseCards || []).find((c) => c.id === looseId);
   if (!card) return;
+  if (card.html) { heldSceneBack(card, before); return; }
   snapshotStructure('loose card placed');
   book.looseCards = book.looseCards.filter((c) => c.id !== looseId);
   const h = insertScene(before - 1, '');
@@ -9258,8 +11214,9 @@ function looseToScene(looseId, before) {
 function goToScene(cell) {
   const sc = sceneOfCell(cell);
   switchTab('manuscript');
-  if (!sc) return;
-  const p = sc.s.p;
+  if (sc) goToSceneHeading(sc.s.p);
+}
+function goToSceneHeading(p) {
   spBodyOf(p).focus({ preventScroll: true });
   spCaretToEnd(p);
   spLastPara = p;
@@ -9314,6 +11271,18 @@ function renderLooseCards() {
     text.className = 'ob-text';
     text.textContent = c.text;
     card.appendChild(text);
+    if (c.html) {
+      // the words it holds: its opening line, and how many
+      const holder = document.createElement('div');
+      holder.innerHTML = c.html;
+      const first = [...holder.children].map((x) => x.textContent).join(' ').replace(/\s+/g, ' ').trim();
+      if (!c.text) text.textContent = c.title || (first.length > 120 ? first.slice(0, 117) + '…' : first);
+      const n = document.createElement('div');
+      n.className = 'ob-held';
+      n.textContent = t('{n} words', { n: (c.words || countWords(holder.textContent)).toLocaleString() });
+      card.appendChild(n);
+      cell.dataset.held = c.held || 'section';
+    }
     list.appendChild(cell);
   }
   const add = document.createElement('button');
@@ -9321,7 +11290,7 @@ function renderLooseCards() {
   add.className = 'loose-add';
   add.textContent = t('+ card');
   add.onclick = () => addLooseCard();
-  list.appendChild(add);
+  if (moreOn() || isScript()) list.appendChild(add);
   if (!(book.looseCards || []).length) {
     const tip = document.createElement('div');
     tip.className = 'loose-tip';
@@ -9343,25 +11312,200 @@ function saveLooseCard(id, val) {
   const cards = book.looseCards || [];
   const c = cards.find((x) => x.id === id);
   if (!c) return;
-  if (!val) { book.looseCards = cards.filter((x) => x.id !== id); scheduleMetaSave(); setTimeout(renderLooseCards, 0); return; }
+  // an emptied note takes the card away, unless the card holds writing
+  if (!val && !c.html) { book.looseCards = cards.filter((x) => x.id !== id); scheduleMetaSave(); setTimeout(renderLooseCards, 0); return; }
   if (c.text === val) return;
   c.text = val;
   scheduleMetaSave();
 }
 
-function removeLooseCard(id) {
-  snapshotStructure('loose card removed');
+async function removeLooseCard(id, quiet = false) {
+  const card = (book.looseCards || []).find((x) => x.id === id);
+  if (!card) return;
+  // words on the card go to Darlings first; the card goes only once they're safe there
+  if (card.html) {
+    const holder = document.createElement('div');
+    holder.innerHTML = card.html;
+    darlings.unshift({
+      id: 'd-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
+      html: card.html,
+      text: [...holder.children].map((x) => x.textContent).join('\n'),
+      chapterId: null,
+      chapterLabel: t('Loose cards'),
+      date: new Date().toISOString()
+    });
+    try {
+      await writeSidecar(book.id, 'darlings', darlings);
+    } catch {
+      darlings.shift();
+      toast(t('NEO couldn’t save to Darlings, so the card stays'));
+      return;
+    }
+    renderDarlings();
+    if (!quiet) toast(t('The card’s words are in Darlings'));
+  }
+  if (!quiet) snapshotStructure('loose card removed');
   book.looseCards = (book.looseCards || []).filter((x) => x.id !== id);
   scheduleMetaSave();
   renderLooseCards();
 }
 
+// ---- whole chapters and scenes set aside as loose cards ----
+// The card carries the writing (as html) and what belongs to it, and is
+// written to book.json before the chapter or the scene leaves the page, so
+// the words are always somewhere on disk. Placed again, it comes back whole.
+
+// a chapter of the story that isn't the book's only one
+function canSetChapterAside(chId) {
+  return !!chId && isStory(chId) && book.chapterOrder.filter((c) => isStory(c)).length > 1;
+}
+
+// book.json with the card in it, or the card taken back out and false
+async function saveHeldCard(card) {
+  let stamp = null;
+  try { stamp = await writeBookMeta(book.id, book); } catch (err) { window.neo.logError('loose card: ' + (err && err.message || err)); }
+  if (typeof stamp !== 'string') {
+    book.looseCards = (book.looseCards || []).filter((c) => c !== card);
+    toast(t('NEO couldn’t save the card, so the writing stays where it was'));
+    return false;
+  }
+  book.modified = stamp;
+  savedMetaSig = metaSig(book);
+  return true;
+}
+
+async function chapterToLoose(chId) {
+  if (!canSetChapterAside(chId)) return;
+  const body = chapterBodyEl(chId);
+  if (body && body.querySelector('.ph-mark')) { toast(t('That chapter has a placeholder in it. Move the placeholder first.')); return; }
+  snapshotStructure('card to loose');
+  if (body) syncChapter(body, chId);
+  const kind = chapterKind(chId);
+  const card = {
+    id: 'lc-' + Date.now().toString(36),
+    held: 'chapter',
+    title: (book.chapterTitles || {})[chId] || '',
+    text: (book.chapterNotes || {})[chId] || '',
+    html: chapterHTML[chId] || '',
+    notes: JSON.parse(JSON.stringify((book.sectionNotes || {})[chId] || [])),
+    words: chapterWords(chId)
+  };
+  if (kind !== 'chapter') card.kind = kind;
+  (book.looseCards = book.looseCards || []).push(card);
+  if (!(await saveHeldCard(card))) return;
+  if (book.chapterTitles) delete book.chapterTitles[chId];
+  if (currentChapterId === chId) currentChapterId = null;
+  await deleteChapterQuiet(chId);
+  renderLooseCards();
+  if (currentTab === 'outline') renderBoard();
+  updateCounters();
+  toast(t('The chapter is on a loose card, its words with it. Drag it back between two chapters to put it in again.'), 6000);
+}
+
+function looseToChapter(looseId, index) {
+  const card = (book.looseCards || []).find((c) => c.id === looseId);
+  if (!card) return;
+  snapshotStructure('loose card placed');
+  const chId = 'ch-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
+  book.chapterOrder.splice(Math.max(0, Math.min(index, book.chapterOrder.length)), 0, chId);
+  chapterHTML[chId] = card.html || '<p><br></p>';
+  if (card.title) (book.chapterTitles = book.chapterTitles || {})[chId] = card.title;
+  if (card.text) (book.chapterNotes = book.chapterNotes || {})[chId] = card.text;
+  if (card.notes && card.notes.length) (book.sectionNotes = book.sectionNotes || {})[chId] = card.notes;
+  if (card.kind) setChapterKind(chId, card.kind);
+  book.looseCards = book.looseCards.filter((c) => c.id !== looseId);
+  // the chapter's file is written before book.json lets the card go
+  persistChapter(chId).then(() => saveMeta())
+    .catch((err) => window.neo.logError('loose to chapter: ' + (err && err.message || err)));
+  renderChapters();
+  renderLooseCards();
+  updateCounters();
+}
+
+async function sceneToLoose(cell) {
+  const sc = sceneOfCell(cell);
+  if (!sc || !sc.s.p.isConnected) return;
+  const nodes = sceneNodes(sc.s);
+  const body = spBodyOf(sc.s.p);
+  const chId = body.closest('.chapter').dataset.id;
+  snapshotStructure('card to loose');
+  const holder = document.createElement('div');
+  for (const n of nodes) holder.appendChild(n.cloneNode(true));
+  const head = holder.firstElementChild;
+  if (head) head.removeAttribute('data-scene-id');
+  const card = {
+    id: 'lc-' + Date.now().toString(36),
+    held: 'scene',
+    text: (cell.dataset.sid && (book.sceneNotes || {})[cell.dataset.sid]) || '',
+    html: captureBody(holder),
+    words: countWords(nodes.map((n) => n.textContent).join('\n'))
+  };
+  (book.looseCards = book.looseCards || []).push(card);
+  if (!(await saveHeldCard(card))) return;
+  for (const n of nodes) n.remove();
+  if (!body.querySelector('p')) body.innerHTML = '<p><br></p>';
+  if (cell.dataset.sid && book.sceneNotes) delete book.sceneNotes[cell.dataset.sid];
+  syncChapter(body, chId);
+  clearTimeout(saveTimers[chId]);
+  persistChapter(chId).then(() => saveMeta())
+    .catch((err) => window.neo.logError('scene to loose: ' + (err && err.message || err)));
+  breakRun++;
+  spRepaginate();
+  renderNav();
+  renderLooseCards();
+  renderBoard();
+  updateCounters();
+  toast(t('The scene is on a loose card, its lines with it. Drag it back onto the board to put it in again.'), 6000);
+}
+
+// a card holding a scene's lines: back in before scene `before` (or at the end)
+function heldSceneBack(card, before) {
+  const scenes = scriptScenes();
+  const target = scenes[before] && scenes[before].s.p.isConnected ? scenes[before].s.p : null;
+  const dest = target ? spBodyOf(target) : spBodies()[spBodies().length - 1];
+  if (!dest) return;
+  snapshotStructure('loose card placed');
+  const holder = document.createElement('div');
+  holder.innerHTML = card.html;
+  const nodes = [...holder.children];
+  if (!nodes.length) return;
+  // an empty script's one blank line gives way
+  if (!dest.textContent.trim() && dest.children.length === 1) dest.innerHTML = '';
+  if (card.text) {
+    const id = newSceneId();
+    (book.sceneNotes = book.sceneNotes || {})[id] = card.text;
+    nodes[0].dataset.sceneId = id;
+  }
+  for (const n of nodes) { if (target) target.before(n); else dest.appendChild(n); }
+  book.looseCards = book.looseCards.filter((c) => c.id !== card.id);
+  const chId = dest.closest('.chapter').dataset.id;
+  syncChapter(dest, chId);
+  clearTimeout(saveTimers[chId]);
+  persistChapter(chId).then(() => saveMeta())
+    .catch((err) => window.neo.logError('loose to scene: ' + (err && err.message || err)));
+  breakRun++;
+  spRepaginate();
+  renderNav();
+  renderLooseCards();
+  updateCounters();
+}
+
 // the right-hand pane holds loose cards while the Outline is up (there are
 // no placeholders to show there)
 function sidePaneForTab(name) {
-  const outline = name === 'outline' && !!book;
+  const notes = name === 'notes' && !!book;
+  $('#editor-view').classList.toggle('notes-tab', notes);
+  if (notes) { renderNotesNav(); renderNotesSide(); }
+  // loose cards are behind Show More Features; a book that has some keeps them in view
+  const outline = name === 'outline' && !!book && (moreOn() || isScript() || !!(book.looseCards || []).length);
   $('#editor-view').classList.toggle('outline-tab', outline);
   if (outline) renderLooseCards();
+  // on Darlings the pane holds the book's snapshots, and stays open
+  const was = $('#editor-view').classList.contains('darlings-tab');
+  const dar = name === 'darlings' && !!book && snapsCan() && !IS_POCKET; // (Pocket's own list: later)
+  $('#editor-view').classList.toggle('darlings-tab', dar);
+  if (dar) { snapList(); $('#side-pane').classList.add('open'); }
+  else if (was && $('#side-pane').dataset.pinned !== '1') $('#side-pane').classList.remove('open');
 }
 
 // ---- the note walks ahead ----
@@ -9406,6 +11550,152 @@ function hideWalkNote() {
   walkP = null;
 }
 
+// ---- the cards beside the page (#340) ----
+// While writing, the top of the right-hand pane holds the Outline's cards for
+// where the caret is: the chapter's card and its sections' (the one the caret
+// is in marked), or in a script the scene's. They're the same notes the
+// Outline shows, and they stay here after the gray ghost on the page has
+// been written over. Typed on here, they change there too.
+let sideCardsKey = '';
+let sideCardsQueued = false;
+function sideCardsBox() {
+  let box = $('#side-cards');
+  if (box) return box;
+  box = document.createElement('div');
+  box.id = 'side-cards';
+  $('#side-head').before(box);
+  return box;
+}
+// the section (by its note's id) holding p, ghost or written
+function sectionOf(body, p) {
+  const chId = body.closest('.chapter')?.dataset.id;
+  const notes = new Set(((book.sectionNotes || {})[chId] || []).map((s) => s.id));
+  const claimed = new Set();
+  let id = null;
+  for (const el of body.children) {
+    if (el.classList.contains('scene-break')) {
+      if (id) claimed.add(id);
+      id = null;
+      if (el === p) return null;
+      continue;
+    }
+    if (!id && el.dataset && notes.has(el.dataset.secId) && !claimed.has(el.dataset.secId)) id = el.dataset.secId;
+    if (el === p) return id;
+  }
+  return null;
+}
+function queueSideCards() {
+  if (sideCardsQueued) return;
+  sideCardsQueued = true;
+  requestAnimationFrame(() => { sideCardsQueued = false; sideCardsUpdate(); });
+}
+function sideCardsUpdate(force) {
+  const box = sideCardsBox();
+  // (the cards beside the page are behind Show More Features)
+  if (!book || currentTab !== 'manuscript' || !moreOn()) { if (sideCardsKey) { box.innerHTML = ''; sideCardsKey = ''; } return; }
+  if (box.contains(document.activeElement)) return; // being typed on
+  const sel = window.getSelection();
+  let el = sel.rangeCount ? sel.anchorNode : null;
+  if (el && el.nodeType === Node.TEXT_NODE) el = el.parentElement;
+  const p = el && el.closest ? el.closest('.chapter-body > p') : null;
+  const body = p ? p.parentElement : null;
+  const chId = body ? body.closest('.chapter').dataset.id : currentChapterId;
+  let key = '';
+  let cards = [];
+  if (chId && isScript()) {
+    // the scene: its heading, at or above the caret
+    let h = p;
+    while (h && !h.classList.contains('sp-heading')) h = h.previousElementSibling;
+    if (h) {
+      // (a scene gets its id with its first note, here as on the Outline)
+      const sid = h.dataset.sceneId || '';
+      key = 'scene:' + (sid || [...body.querySelectorAll('p.sp-heading')].indexOf(h)) + ':' + h.textContent;
+      cards = [{ kind: 'scene', id: sid, head: h, label: h.textContent.trim() || t('Scene'), text: (book.sceneNotes || {})[sid] || '', current: false }];
+    }
+  } else if (chId && book.chapterOrder.includes(chId) && isStory(chId)) {
+    const secId = body ? sectionOf(body, p) : null;
+    const secs = (book.sectionNotes || {})[chId] || [];
+    key = 'ch:' + chId + ':' + (secId || '') + ':' + secs.length;
+    cards = [{ kind: 'chapter', id: chId, label: (book.chapterTitles || {})[chId] || chapterName(chId), text: (book.chapterNotes || {})[chId] || '', current: false },
+      ...secs.map((s, i) => ({ kind: 'section', id: s.id, chId, label: t('Section {letter}', { letter: secLetter(i) }), text: s.text || '', current: s.id === secId }))];
+  }
+  if (key === sideCardsKey && !force) return;
+  sideCardsKey = key;
+  box.innerHTML = '';
+  if (cards.length) {
+    const title = document.createElement('div');
+    title.className = 'side-cards-title';
+    title.textContent = isScript() ? t('Scene cards') : t('Cards');
+    box.appendChild(title);
+  }
+  for (const c of cards) {
+    const card = document.createElement('div');
+    card.className = 'side-card side-card-' + c.kind + (c.current ? ' current' : '');
+    const head = document.createElement('div');
+    head.className = 'side-card-head';
+    head.textContent = c.label;
+    // the card's name takes the caret to the top of its place on the page (#367)
+    head.tabIndex = 0;
+    head.setAttribute('role', 'button');
+    head.title = t('Go to the page');
+    const go = () => {
+      if (c.kind === 'chapter') goToChapterTop(c.id);
+      else if (c.kind === 'section') goToSegment(c.chId, chapterSegments(c.chId).find((s) => s.id === c.id));
+      else if (c.head.isConnected) goToSceneHeading(c.head);
+    };
+    head.addEventListener('click', go);
+    head.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      e.preventDefault();
+      go();
+    });
+    const ta = document.createElement('textarea');
+    ta.spellcheck = false;
+    ta.rows = 1;
+    ta.value = c.text;
+    ta.placeholder = c.kind === 'chapter' ? t('What happens in this chapter?') : c.kind === 'scene' ? t('What happens in this scene?') : t('What happens in this section?');
+    ta.setAttribute('aria-label', c.label);
+    const fit = () => { ta.style.height = 'auto'; ta.style.height = ta.scrollHeight + 'px'; };
+    ta.addEventListener('input', () => {
+      const val = ta.value.trim();
+      if (c.kind === 'chapter') book.chapterNotes[c.id] = val;
+      else if (c.kind === 'scene') {
+        book.sceneNotes = book.sceneNotes || {};
+        if (!c.id && val && c.head.isConnected) {
+          c.id = newSceneId();
+          c.head.dataset.sceneId = c.id;
+          syncChapter(spBodyOf(c.head), spChapterOf(c.head));
+        }
+        if (c.id) { if (val) book.sceneNotes[c.id] = val; else delete book.sceneNotes[c.id]; }
+      }
+      else { const s = (book.sectionNotes[c.chId] || []).find((x) => x.id === c.id); if (s) s.text = val; }
+      scheduleMetaSave();
+      fit();
+    });
+    ta.addEventListener('blur', () => {
+      if (c.kind === 'section') syncGhosts(c.chId);
+      if (c.kind === 'scene') spSchedule();
+      renderNav();
+    });
+    ta.addEventListener('keydown', (e) => {
+      // Esc (or Enter without Shift) goes back to the page
+      if (e.key === 'Escape' || (e.key === 'Enter' && !e.shiftKey && !e.isComposing)) {
+        e.preventDefault();
+        e.stopPropagation();
+        ta.blur();
+        focusPage();
+      }
+    });
+    card.append(head, ta);
+    box.appendChild(card);
+    requestAnimationFrame(fit);
+  }
+}
+document.addEventListener('selectionchange', queueSideCards);
+// the pane coming into view shows the cards as they are now (the Outline may
+// have changed them since)
+$('#side-hotzone').addEventListener('mouseenter', () => sideCardsUpdate(true));
+
 function walkNoteUpdate() {
   walkQueued = false;
   if (!book || currentTab !== 'manuscript' || isScript()) { hideWalkNote(); return; }
@@ -9419,7 +11709,9 @@ function walkNoteUpdate() {
   const note = at && at.id ? sectionNote(at.chId, at.id) : null;
   if (!note || !note.text || note.dismissed) { hideWalkNote(); return; }
   const chapter = body.closest('.chapter');
-  if (!walkEl || !walkEl.isConnected || walkEl.parentElement !== chapter || walkEl.dataset.sec !== note.id) {
+  // cut into pages, a chapter's sheet is in pieces, and the note sits on the paper instead
+  const host = document.body.classList.contains('paged') ? $('#paper') : chapter;
+  if (!walkEl || !walkEl.isConnected || walkEl.parentElement !== host || walkEl.dataset.sec !== note.id) {
     hideWalkNote();
     walkEl = document.createElement('div');
     walkEl.className = 'walk-note';
@@ -9441,7 +11733,7 @@ function walkNoteUpdate() {
       hideWalkNote();
     });
     walkEl.append(text, dismiss);
-    chapter.appendChild(walkEl);
+    host.appendChild(walkEl);
   }
   if (walkP !== p) {
     for (const q of body.querySelectorAll('p[data-walk]')) if (q !== p) q.removeAttribute('data-walk');
@@ -9453,14 +11745,16 @@ function walkNoteUpdate() {
 
 function placeWalkNote() {
   if (!walkEl || !walkP || !walkP.isConnected) return;
-  const chapter = walkEl.parentElement;
+  const host = walkEl.parentElement; // the chapter, or the paper when it is cut into pages
   const body = walkP.parentElement;
-  const c = chapter.getBoundingClientRect();
-  const b = body.getBoundingClientRect();
+  const c = host.getBoundingClientRect();
+  // a paragraph can run over a page break: the note goes under its last piece, in that page's column
+  const pieces = walkP.getClientRects();
+  const p = pieces.length ? pieces[pieces.length - 1] : walkP.getBoundingClientRect();
+  const b = [...body.getClientRects()].find((r) => p.left >= r.left - 1 && p.right <= r.right + 1 && p.top >= r.top - 1 && p.bottom <= r.bottom + 1) || body.getBoundingClientRect();
   walkEl.style.left = (b.left - c.left) + 'px';
   walkEl.style.width = b.width + 'px';
-  chapter.style.setProperty('--walk-h', (walkEl.offsetHeight + 8) + 'px');
-  const p = walkP.getBoundingClientRect();
+  walkP.closest('.chapter').style.setProperty('--walk-h', (walkEl.offsetHeight + 8) + 'px');
   walkEl.style.top = (p.bottom - c.top + 2) + 'px';
 }
 
@@ -9478,6 +11772,7 @@ $('#aux-editor').addEventListener('keydown', (e) => { if (styleKeepScroll(e)) re
 $('#aux-editor').addEventListener('input', () => {
   auxDirty = true;
   scheduleAuxSave();
+  notesTyped();
   if (spellOn) {
     const key = 'aux-' + ($('#aux-editor').dataset.kind || 'notes');
     scheduleSpellRescan(key, $('#aux-editor'));
@@ -9691,6 +11986,7 @@ function updateCounters() {
     return;
   }
   const total = bookWordCount();
+  const known = book.wordCount; // the count before this one (trackDailyWords)
   const wc = $('#word-counter');
   if (isScript()) spCounters();
   else updateBookCounters(total, wc);
@@ -9705,7 +12001,7 @@ function updateCounters() {
       requestPaint(book, bookPlainText());
     }
   }
-  trackDailyWords(total);
+  trackDailyWords(total, known);
 }
 function updateBookCounters(total, wc) {
   if (wordMode === 'book') setText(wc, t('{n} words', { n: total }));
@@ -9740,9 +12036,16 @@ function writingDay(d = new Date()) {
 }
 const todayStr = () => writingDay();
 
-function trackDailyWords(total) {
+// when the text last came in from disk (a book opening, another device's
+// changes adopted): a drop then isn't the writer cutting (#345)
+let diskWordsAt = 0;
+function trackDailyWords(total, known = book.wordCount) {
   book.dailyCounts = book.dailyCounts || {};
   const today = todayStr();
+  // a book that reads as empty for a moment (its chapters still coming in,
+  // or a synced folder still downloading them) must not set the day's start:
+  // from zero, "today" would count the whole book (#345)
+  if (!total && (known || 0) > 0) return;
   if (!book.dailyCounts[today]) {
     book.dailyCounts[today] = { start: total, end: total };
     scheduleMetaSave();
@@ -9753,13 +12056,13 @@ function trackDailyWords(total) {
   // day's start down with them, so today never reads below zero, and what's
   // written after the cut counts in full. (Cut what you wrote today, and
   // today is smaller: that part is honest.)
-  if (total < book.dailyCounts[today].start) {
+  if (total < book.dailyCounts[today].start && Date.now() - diskWordsAt > 3000) {
     book.dailyCounts[today].start = total;
     scheduleMetaSave();
   }
   if (sprint && sprint.bookId !== book.id) sprint = null; // a sprint belongs to the book it began in
   if (sprint && total < sprint.startCount) sprint.startCount = total;
-  const wordsToday = book.dailyCounts[today].end - book.dailyCounts[today].start;
+  const wordsToday = Math.max(0, book.dailyCounts[today].end - book.dailyCounts[today].start);
   const gc = $('#goal-counter');
   if (sprint && !sprint.done) {
     const sprintWords = total - sprint.startCount;
@@ -9790,10 +12093,14 @@ function currentPage(cur) {
   const sel = window.getSelection();
   const body = document.querySelector(`.chapter[data-id="${cur}"] .chapter-body`);
   if (isStory(cur) && body && sel.rangeCount && body.contains(sel.anchorNode)) {
-    const r = document.createRange();
-    r.selectNodeContents(body);
-    r.setEnd(sel.anchorNode, sel.anchorOffset);
-    before += countWords(plainText(r.cloneContents()));
+    let n = wordsBeforeCaret(body, sel.anchorNode, sel.anchorOffset);
+    if (n == null) {
+      const r = document.createRange();
+      r.selectNodeContents(body);
+      r.setEnd(sel.anchorNode, sel.anchorOffset);
+      n = countWords(plainText(r.cloneContents()));
+    }
+    before += n;
   }
   return Math.min(pageCount(bookWordCount()), Math.floor(before / WORDS_PER_PAGE) + 1);
 }
@@ -10025,6 +12332,7 @@ async function keepOtherDeviceVersion(bookId, chId, disk) {
 }
 
 function scheduleChapterSave(chId) {
+  maybeDailySnapshot(); // SNAPSHOTS: the first change of the day keeps the day's start
   clearTimeout(saveTimers[chId]);
   const bookId = book && book.id;
   saveTimers[chId] = setTimeout(() => {
@@ -10033,6 +12341,9 @@ function scheduleChapterSave(chId) {
     // above while this save waited: its words are already where they belong,
     // and writing now would only leave an empty stray file in chapters/
     if (book.id !== bookId || !book.chapterOrder.includes(chId)) return;
+    // a flush (a blur, the 20 s tick) wrote these words while this save
+    // waited; a write still on its way may yet fail, so this one queues behind it
+    if (!writing[chId] && chapterHTML[chId] === savedHTML[chId]) return;
     persistChapter(chId);
   }, 800);
 }
@@ -10110,6 +12421,580 @@ function flushAllSaves(e) {
 }
 
 /* ================================================================== */
+/*  SNAPSHOTS                                                          */
+/* ================================================================== */
+
+// ⌘S takes a snapshot of the book: the chapters that changed since the last
+// snapshot, plus the book's shape (order, titles, kinds) and a fingerprint of
+// every chapter. NEO takes one on its own before the first change of each
+// writing day. They're listed in the right-hand pane on the Darlings tab;
+// picking one shows the book as it was, read-only, with what has gone since
+// marked, and brings a chapter or the whole book back.
+//
+// book-…/snapshots/<name>/  one folder per snapshot, its files written once
+// (main.js, Pocket's bridge): <chapterId>.html for each chapter that changed,
+// then snapshot.json, last, so a folder without it is still being written.
+// A chapter's text at a snapshot is in the newest snapshot at or before it
+// that holds the file. The name carries what the list shows:
+//   20261009T121400Z-k-3-84210-x7q2   when (UTC) · kind · chapters changed · words
+// k: taken with ⌘S (kept until deleted) · d: the start of a writing day ·
+// r: just before a snapshot was brought back. NEO's own (d, r) go after 30
+// days; a snapshot that goes hands its chapters on to the next one first.
+const SNAP_KEPT = 'k';
+const SNAP_KEEP_DAYS = 30;
+function snapName(ms, kind, changed, words, rand = Math.random().toString(36).slice(2, 6)) {
+  const when = new Date(ms).toISOString().replace(/[-:]/g, '').slice(0, 15);
+  return `${when}Z-${kind}-${Math.max(0, changed | 0)}-${Math.max(0, Math.round(words) || 0)}-${String(rand).replace(/[^a-z0-9]/g, '') || 'x'}`;
+}
+function parseSnapName(name) {
+  const m = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z-([a-z])-(\d+)-(\d+)-[a-z0-9]+$/.exec(name);
+  if (!m) return null;
+  return { name, at: Date.UTC(+m[1], m[2] - 1, +m[3], +m[4], +m[5], +m[6]), kind: m[7], changed: +m[8], words: +m[9] };
+}
+// a short fingerprint of a chapter's text (cyrb53): equal text, equal print
+function textHash(str) {
+  let h1 = 0xdeadbeef;
+  let h2 = 0x41c6ce57;
+  for (let i = 0; i < str.length; i++) {
+    const ch = str.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36) + ':' + str.length;
+}
+// NEO's own snapshots older than a month go, by their names alone (so every
+// device picks the same ones); ⌘S snapshots and the newest one stay
+function snapsToThin(snaps, now) {
+  const newest = snaps.reduce((a, s) => (!a || s.at > a.at ? s : a), null);
+  return snaps.filter((s) => s !== newest && s.kind !== SNAP_KEPT && now - s.at > SNAP_KEEP_DAYS * 86400000).map((s) => s.name);
+}
+// where a chapter's text at snapshots[i] is: the newest snapshot at or
+// before it holding the file (snapshots oldest first, each with `files`)
+function snapHolder(snaps, i, chId) {
+  for (let k = i; k >= 0; k--) if (snaps[k].files.has(chId + '.html')) return snaps[k];
+  return null;
+}
+// Which words of an older text the chapter no longer has, paragraph by
+// paragraph. A paragraph still there word for word is left alone; one with
+// no near twin today is gone whole; one rewritten is compared word by word
+// with today's paragraph that shares the most words with it.
+// → for each old paragraph: null (still there), 'all', or its gone words' places
+function wordsGone(oldParas, curParas) {
+  const words = (s) => String(s).split(/\s+/).filter(Boolean);
+  const curWords = curParas.map(words);
+  const here = new Set(curWords.map((w) => w.join(' ')));
+  const curSets = curWords.map((w) => new Set(w));
+  return oldParas.map((text) => {
+    const w = words(text);
+    if (!w.length || here.has(w.join(' '))) return null;
+    const mine = new Set(w);
+    let best = -1;
+    let bestScore = 0;
+    curSets.forEach((set, i) => {
+      let shared = 0;
+      for (const x of mine) if (set.has(x)) shared++;
+      const score = shared / Math.max(mine.size, set.size);
+      if (score > bestScore) { bestScore = score; best = i; }
+    });
+    if (best < 0 || bestScore < 0.4) return 'all';
+    const b = curWords[best];
+    const n = w.length;
+    const m = b.length;
+    if (n * m > 4e6) return 'all';
+    // the longest run of words the two share, in order; the rest is gone
+    const L = Array.from({ length: n + 1 }, () => new Uint16Array(m + 1));
+    for (let i = n - 1; i >= 0; i--) {
+      for (let j = m - 1; j >= 0; j--) L[i][j] = w[i] === b[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+    }
+    const gone = [];
+    for (let i = 0, j = 0; i < n;) {
+      if (j < m && w[i] === b[j]) { i++; j++; } else if (j < m && L[i][j + 1] >= L[i + 1][j]) j++;
+      else { gone.push(i); i++; }
+    }
+    return gone.length ? gone : null;
+  });
+}
+// (the rules above are plain functions: scripts/snapshots.test.js)
+
+// a chapter's saved HTML as an inert copy (a <template> loads no images)
+function snapHolderEl(html) {
+  const tpl = document.createElement('template');
+  tpl.innerHTML = html || '';
+  tpl.content.querySelectorAll(UNCOUNTED).forEach((n) => n.remove());
+  return tpl.content;
+}
+const htmlWords = (html) => countWords(plainText(snapHolderEl(html)));
+const htmlParas = (html) => [...snapHolderEl(html).children].map((p) => p.textContent);
+const snapsCan = () => !!(window.neo && window.neo.snapshotWrite);
+const logSnap = (err) => window.neo.logError('snapshot: ' + ((err && err.message) || err));
+
+// The book's snapshots, oldest first: { name, at, kind, changed, words, files: Set }.
+// Only finished ones (snapshot.json written).
+let snapCache = null;
+async function loadSnaps(bookId, fresh) {
+  if (!fresh && snapCache && snapCache.bookId === bookId) return snapCache.snaps;
+  const raw = await window.neo.snapshotList(bookId);
+  const snaps = [];
+  for (const r of raw || []) {
+    const s = parseSnapName(r.name);
+    if (!s || !r.files.includes('snapshot.json')) continue;
+    s.files = new Set(r.files);
+    snaps.push(s);
+  }
+  snaps.sort((a, b) => a.at - b.at || (a.name < b.name ? -1 : 1));
+  snapCache = { bookId, snaps };
+  return snaps;
+}
+async function snapMeta(bookId, s) {
+  if (!s.meta) {
+    try { s.meta = JSON.parse(await window.neo.snapshotRead(bookId, s.name, 'snapshot.json')); } catch { s.meta = null; }
+  }
+  return s.meta;
+}
+
+// Takes a snapshot of the open book. `htmlOf` gives each chapter's text (by
+// default what's on the page). Resolves to { snap, same } — same: nothing
+// had changed since the last snapshot, so none was taken.
+let snapChain = Promise.resolve();
+function takeSnapshot(kind, htmlOf = (c) => chapterHTML[c] || '', { ifNoneToday = false } = {}) {
+  const run = () => takeSnapshotNow(kind, htmlOf, { ifNoneToday });
+  const p = snapChain.catch(() => {}).then(run);
+  snapChain = p;
+  return p;
+}
+async function takeSnapshotNow(kind, htmlOf, { ifNoneToday }) {
+  if (!book || !snapsCan()) return null;
+  const bookId = book.id;
+  const order = [...book.chapterOrder];
+  const titles = { ...(book.chapterTitles || {}) };
+  const kinds = { ...(book.chapterKinds || {}) };
+  const texts = {};
+  for (const c of order) texts[c] = htmlOf(c);
+  const snaps = await loadSnaps(bookId);
+  const now = Date.now();
+  if (ifNoneToday && snaps.some((s) => new Date(s.at).toDateString() === new Date(now).toDateString())) return null;
+  const last = snaps[snaps.length - 1] || null;
+  const lastMeta = last ? await snapMeta(bookId, last) : null;
+  const hashes = {};
+  const words = {};
+  const changed = [];
+  let total = 0;
+  for (const c of order) {
+    hashes[c] = textHash(texts[c]);
+    words[c] = htmlWords(texts[c]);
+    total += words[c];
+    const known = lastMeta && lastMeta.hashes && lastMeta.hashes[c] === hashes[c] && snapHolder(snaps, snaps.length - 1, c);
+    if (!known) changed.push(c);
+  }
+  if (!total && !lastMeta && kind !== SNAP_KEPT) return null; // nothing written yet
+  const sameShape = lastMeta && JSON.stringify(lastMeta.chapterOrder) === JSON.stringify(order) &&
+    order.every((c) => (lastMeta.chapterTitles || {})[c] === titles[c] && (lastMeta.chapterKinds || {})[c] === kinds[c]);
+  if (!changed.length && sameShape && (kind !== SNAP_KEPT || last.kind === SNAP_KEPT)) return { snap: last, same: true };
+  const name = snapName(now, kind, changed.length, total);
+  for (const c of changed) await window.neo.snapshotWrite(bookId, name, c + '.html', texts[c]);
+  const meta = { v: 1, at: new Date(now).toISOString(), kind, title: book.title || '', chapterOrder: order, chapterTitles: titles, chapterKinds: kinds, hashes, words, changed, total };
+  await window.neo.snapshotWrite(bookId, name, 'snapshot.json', JSON.stringify(meta, null, 1));
+  const snap = parseSnapName(name);
+  snap.files = new Set([...changed.map((c) => c + '.html'), 'snapshot.json']);
+  snap.meta = meta;
+  snaps.push(snap);
+  // NEO's own old ones go, each handing its chapters on to the next first
+  for (const gone of snapsToThin(snaps, now)) {
+    const i = snaps.findIndex((s) => s.name === gone);
+    const next = snaps[i + 1];
+    if (i < 0 || !next) continue;
+    for (const f of snaps[i].files) {
+      if (!f.endsWith('.html') || next.files.has(f)) continue;
+      const text = await window.neo.snapshotRead(bookId, snaps[i].name, f);
+      await window.neo.snapshotWrite(bookId, next.name, f, text);
+      next.files.add(f);
+    }
+    await window.neo.snapshotRemove(bookId, gone);
+    snaps.splice(i, 1);
+  }
+  renderSnapList();
+  return { snap, same: false };
+}
+
+// The first change of a writing day keeps the book as the day found it
+// (what's on disk: savedHTML, before this change reaches it)
+const snapDay = {};
+function maybeDailySnapshot() {
+  if (!book || !snapsCan() || shelfExport) return;
+  const today = new Date().toDateString();
+  if (snapDay[book.id] === today) return;
+  snapDay[book.id] = today;
+  takeSnapshot('d', (c) => (typeof savedHTML[c] === 'string' ? savedHTML[c] : chapterHTML[c] || ''), { ifNoneToday: true }).catch(logSnap);
+}
+
+// ⌘S
+async function snapshotNow() {
+  if (!book || !snapsCan()) return;
+  try {
+    const r = await takeSnapshot(SNAP_KEPT);
+    if (!r) return;
+    const time = snapTime(r.snap.at);
+    if (r.same) { toast(t('Nothing has changed since your last snapshot ({time}).', { time }), 3500); return; }
+    const first = (await loadSnaps(book.id)).length === 1;
+    toast(first ? t('Snapshot taken, {time}: the whole book. It’s on the Darlings tab.', { time })
+      : t('Snapshot taken, {time}: {n} chapters changed. It’s on the Darlings tab.', { time, n: r.snap.changed }), 4000);
+  } catch (err) {
+    logSnap(err);
+    toast(t('NEO couldn’t take a snapshot. Your book itself is saved as usual.'), 6000);
+  }
+}
+
+const snapTime = (at) => new Date(at).toLocaleTimeString(NeoI18n.getLocale(), { hour: 'numeric', minute: '2-digit' });
+function snapWhen(at) {
+  const d = new Date(at);
+  const today = new Date();
+  const time = snapTime(at);
+  if (d.toDateString() === today.toDateString()) return t('today at {time}', { time });
+  if (d.toDateString() === new Date(today.getTime() - 86400000).toDateString()) return t('yesterday at {time}', { time });
+  return d.toLocaleDateString(NeoI18n.getLocale(), { weekday: 'short', month: 'short', day: 'numeric', year: d.getFullYear() === today.getFullYear() ? undefined : 'numeric' }) + ', ' + time;
+}
+function snapWhy(kind) {
+  if (kind === SNAP_KEPT) return t('Taken by you');
+  if (kind === 'd') return t('Start of the day');
+  if (kind === 'r') return t('Before a restore');
+  return '';
+}
+
+// ---- the list: the right-hand pane, while Darlings is up ----
+let snapShown = null; // the snapshot on the page, or null for the darlings
+function snapList() {
+  let list = $('#snap-list');
+  if (list) return list;
+  const head = $('#side-head > span');
+  if (head && !$('#side-head .side-title-snaps')) {
+    head.classList.add('side-title-notes');
+    const alt = document.createElement('span');
+    alt.className = 'side-title-snaps';
+    alt.textContent = t('Snapshots');
+    head.after(alt);
+  }
+  list = document.createElement('div');
+  list.id = 'snap-list';
+  list.setAttribute('role', 'listbox');
+  $('#sticky-list').after(list);
+  return list;
+}
+async function renderSnapList() {
+  if (!book || currentTab !== 'darlings') return;
+  const list = snapList();
+  const bookId = book.id;
+  let snaps = [];
+  try { snaps = await loadSnaps(bookId); } catch (err) { logSnap(err); }
+  if (!book || book.id !== bookId) return;
+  list.innerHTML = '';
+  const item = (cls, title, sub, on, onClick) => {
+    const b = document.createElement('button');
+    b.className = 'snap-item ' + cls + (on ? ' on' : '');
+    b.setAttribute('role', 'option');
+    b.setAttribute('aria-selected', on ? 'true' : 'false');
+    b.innerHTML = '<span class="snap-dot" aria-hidden="true"></span><span class="snap-line"><span class="snap-t"></span><span class="snap-s"></span></span>';
+    b.querySelector('.snap-t').textContent = title;
+    b.querySelector('.snap-s').textContent = sub;
+    b.onclick = onClick;
+    list.appendChild(b);
+    return b;
+  };
+  item('snap-darlings', t('Darlings'), t('{n} darlings', { n: darlings.length }), !snapShown, () => showDarlingsAgain());
+  if (!snaps.length) {
+    const p = document.createElement('p');
+    p.className = 'snap-empty';
+    p.textContent = IS_MAC ? t('Press ⌘S to take a snapshot of your book. It costs only the chapters that changed.')
+      : t('Press Ctrl+S to take a snapshot of your book. It costs only the chapters that changed.');
+    list.appendChild(p);
+    return;
+  }
+  let lastGroup = '';
+  const today = new Date().toDateString();
+  const yest = new Date(Date.now() - 86400000).toDateString();
+  for (let i = snaps.length - 1; i >= 0; i--) {
+    const s = snaps[i];
+    const d = new Date(s.at).toDateString();
+    const group = d === today ? t('Today') : d === yest ? t('Yesterday') : t('Earlier');
+    if (group !== lastGroup) {
+      const g = document.createElement('div');
+      g.className = 'snap-group';
+      g.textContent = group;
+      list.appendChild(g);
+      lastGroup = group;
+    }
+    const when = group === t('Earlier') ? new Date(s.at).toLocaleDateString(NeoI18n.getLocale(), { month: 'short', day: 'numeric' }) + ', ' + snapTime(s.at) : snapTime(s.at);
+    const what = i === 0 ? t('The whole book') : s.changed ? t('{n} chapters changed', { n: s.changed }) : t('No chapters changed');
+    const on = snapShown && snapShown.name === s.name;
+    const b = item(s.kind === SNAP_KEPT ? 'snap-k' : 'snap-a', when, snapWhy(s.kind) + ' · ' + what, on, () => showSnapshot(s.name));
+    b.title = t('{n} words', { n: s.words });
+    if (on && snapShown.diff && snapShown.diff.length) {
+      // the chapters that differ from today, to jump to
+      const sub = document.createElement('div');
+      sub.className = 'snap-chapters';
+      for (const c of snapShown.diff) {
+        const a = document.createElement('button');
+        a.className = 'snap-ch';
+        a.textContent = c.label;
+        a.onclick = () => { const el = document.querySelector(`#snap-view .snap-chapter[data-id="${c.chId}"]`); if (el) el.scrollIntoView({ block: 'start', behavior: scrollBehavior() }); };
+        sub.appendChild(a);
+      }
+      list.appendChild(sub);
+    }
+  }
+}
+
+// ---- the page: the book as it was ----
+function snapView() {
+  let v = $('#snap-view');
+  if (v) return v;
+  v = document.createElement('div');
+  v.id = 'snap-view';
+  v.hidden = true;
+  $('#darlings-list').after(v);
+  // a passage picked from an old snapshot can go to Darlings
+  v.addEventListener('contextmenu', async (e) => {
+    const sel = window.getSelection();
+    const text = sel && !sel.isCollapsed && v.contains(sel.anchorNode) ? sel.toString().trim() : '';
+    if (!text) return;
+    e.preventDefault();
+    const range = sel.getRangeAt(0).cloneRange();
+    const choice = await popMenu(e.clientX, e.clientY, [
+      { label: t('Copy'), value: 'copy' },
+      { label: t('Set Aside as a Darling'), value: 'darling' }
+    ]);
+    if (choice === 'copy') document.execCommand('copy');
+    if (choice === 'darling') snapToDarling(range, text);
+  });
+  return v;
+}
+
+async function snapToDarling(range, text) {
+  if (!book) return;
+  const holder = document.createElement('div');
+  holder.appendChild(range.cloneContents());
+  const chEl = range.startContainer.parentElement && range.startContainer.parentElement.closest('.snap-chapter');
+  const html = [...holder.querySelectorAll('p')].length ? holder.innerHTML : '<p>' + escHtml(text) + '</p>';
+  darlings.unshift({
+    id: 'd-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
+    html,
+    text: text.slice(0, 2000),
+    chapterId: chEl ? chEl.dataset.id : '',
+    chapterLabel: chEl ? chEl.dataset.label : t('a snapshot'),
+    date: new Date().toISOString()
+  });
+  await writeSidecar(book.id, 'darlings', darlings);
+  renderSnapList();
+  toast(t('Set aside in Darlings.'), 2500);
+}
+
+function showDarlingsAgain() {
+  snapShown = null;
+  if (window.CSS && CSS.highlights) CSS.highlights.delete('neo-snap-gone');
+  const v = $('#snap-view');
+  if (v) { v.hidden = true; v.innerHTML = ''; }
+  if (currentTab !== 'darlings') return;
+  $('#aux-title').textContent = t('Darlings');
+  $('#darlings-list').hidden = false;
+  renderDarlings();
+  renderSnapList();
+  $('#paper-scroll').scrollTop = 0;
+}
+
+// the snapshot's book, chapter by chapter: [{ chId, html }] in its order
+async function snapshotBook(bookId, name) {
+  const snaps = await loadSnaps(bookId, true);
+  const i = snaps.findIndex((s) => s.name === name);
+  if (i < 0) return null;
+  const meta = await snapMeta(bookId, snaps[i]);
+  if (!meta) return null;
+  const chapters = [];
+  for (const chId of meta.chapterOrder) {
+    const at = snapHolder(snaps, i, chId);
+    chapters.push({ chId, html: at ? await window.neo.snapshotRead(bookId, at.name, chId + '.html') : '' });
+  }
+  return { snap: snaps[i], meta, chapters };
+}
+
+async function showSnapshot(name) {
+  if (!book) return;
+  const bookId = book.id;
+  const got = await snapshotBook(bookId, name).catch((err) => { logSnap(err); return null; });
+  if (!book || book.id !== bookId || currentTab !== 'darlings') return;
+  if (!got) { toast(t('NEO couldn’t read that snapshot.')); return; }
+  const { snap, meta, chapters } = got;
+  const shape = { ...book, chapterOrder: meta.chapterOrder, chapterTitles: meta.chapterTitles || {}, chapterKinds: meta.chapterKinds || {} };
+  const label = (chId) => chapterHeading(chId, shape) || chapterName(chId, shape);
+  const v = snapView();
+  $('#darlings-list').hidden = true;
+  $('#aux-title').textContent = t('Your book as it was');
+  v.hidden = false;
+  v.innerHTML = '';
+  if (window.CSS && CSS.highlights) CSS.highlights.delete('neo-snap-gone');
+  // which chapters differ from the book today
+  const diff = [];
+  for (const ch of chapters) {
+    const now = book.chapterOrder.includes(ch.chId) ? (chapterHTML[ch.chId] || '') : null;
+    ch.now = now;
+    ch.same = now !== null && textHash(now) === textHash(ch.html);
+    if (!ch.same) diff.push({ chId: ch.chId, label: label(ch.chId) });
+  }
+  const extra = book.chapterOrder.filter((c) => !meta.chapterOrder.includes(c)).length;
+  snapShown = { name, snap, meta, chapters, diff };
+
+  const band = document.createElement('div');
+  band.className = 'snap-band';
+  band.innerHTML = '<div class="snap-band-what"><span class="snap-band-when"></span><span class="snap-band-sub"></span></div><div class="snap-band-do"><button class="snap-back"></button><button class="snap-all"></button></div>';
+  band.querySelector('.snap-band-when').textContent = t('Your book {when}', { when: snapWhen(snap.at) });
+  band.querySelector('.snap-band-sub').textContent = (diff.length ? t('{n} chapters differ from now', { n: diff.length }) : t('Every chapter is the same as now'))
+    + (extra ? ' · ' + t('{n} chapters added since', { n: extra }) : '');
+  band.querySelector('.snap-back').textContent = t('Back to Darlings');
+  band.querySelector('.snap-back').onclick = showDarlingsAgain;
+  const all = band.querySelector('.snap-all');
+  all.textContent = t('Restore Whole Book');
+  all.disabled = !diff.length && !extra && JSON.stringify(meta.chapterOrder) === JSON.stringify(book.chapterOrder);
+  all.onclick = () => restoreSnapshot(null);
+  v.appendChild(band);
+
+  const ranges = [];
+  for (const ch of chapters) {
+    const sec = document.createElement('section');
+    sec.className = 'snap-chapter' + (ch.same ? ' same' : '');
+    sec.dataset.id = ch.chId;
+    sec.dataset.label = label(ch.chId);
+    const head = document.createElement('div');
+    head.className = 'snap-head';
+    const h = document.createElement('h3');
+    h.textContent = label(ch.chId);
+    head.appendChild(h);
+    const tag = document.createElement('span');
+    tag.className = 'snap-tag';
+    tag.textContent = ch.same ? t('Same as now') : ch.now === null ? t('No longer in the book') : t('Differs from now');
+    head.appendChild(tag);
+    if (!ch.same) {
+      const b = document.createElement('button');
+      b.className = 'snap-one';
+      b.textContent = t('Restore This Chapter');
+      b.onclick = () => restoreSnapshot(ch.chId);
+      head.appendChild(b);
+    }
+    sec.appendChild(head);
+    const body = document.createElement('div');
+    body.className = 'chapter-body snap-body';
+    if (isScript()) body.classList.add('sp-geom');
+    body.appendChild(snapHolderEl(ch.html));
+    sec.appendChild(body);
+    v.appendChild(sec);
+    if (ch.same) continue;
+    const paras = [...body.children];
+    if (ch.now === null) { paras.forEach((p) => p.classList.add('snap-gone')); continue; }
+    const gone = wordsGone(paras.map((p) => p.textContent), htmlParas(ch.now));
+    paras.forEach((p, k) => {
+      const g = gone[k];
+      if (!g) return;
+      if (g === 'all') { p.classList.add('snap-gone'); return; }
+      ranges.push(...wordRanges(p, new Set(g)));
+    });
+  }
+  if (ranges.length && window.CSS && CSS.highlights && window.Highlight) CSS.highlights.set('neo-snap-gone', new Highlight(...ranges));
+  renderSnapList();
+  // to the first chapter that differs
+  const first = diff.length && v.querySelector(`.snap-chapter[data-id="${diff[0].chId}"]`);
+  if (first) first.scrollIntoView({ block: 'start' });
+  else $('#paper-scroll').scrollTop = 0;
+}
+
+// ranges over the words of p at the given places (its text nodes end to end)
+function wordRanges(p, at) {
+  const nodes = [];
+  let full = '';
+  const walk = document.createTreeWalker(p, NodeFilter.SHOW_TEXT);
+  for (let n = walk.nextNode(); n; n = walk.nextNode()) { nodes.push({ n, from: full.length }); full += n.data; }
+  const spot = (pos) => {
+    let k = nodes.length - 1;
+    while (k > 0 && nodes[k].from > pos) k--;
+    return [nodes[k].n, Math.min(pos - nodes[k].from, nodes[k].n.data.length)];
+  };
+  const out = [];
+  let w = 0;
+  for (const m of full.matchAll(/\S+/g)) {
+    if (at.has(w)) {
+      const r = document.createRange();
+      r.setStart(...spot(m.index));
+      r.setEnd(...spot(m.index + m[0].length));
+      out.push(r);
+    }
+    w++;
+  }
+  return out;
+}
+
+// A chapter (chId) or the whole book (null) as the shown snapshot had it.
+// The book as it stands is snapshotted first, and ⌘Z undoes the restore.
+async function restoreSnapshot(chId) {
+  const shown = snapShown;
+  if (!book || !shown) return;
+  try {
+    await takeSnapshot('r');
+  } catch (err) {
+    logSnap(err); // never replace words that couldn't be kept
+    toast(t('NEO couldn’t snapshot the book as it is now, so nothing was changed.'), 6000);
+    return;
+  }
+  const { meta, chapters, snap } = shown;
+  const byId = Object.fromEntries(chapters.map((c) => [c.chId, c.html]));
+  snapshotStructure('snapshot');
+  book.chapterTitles = book.chapterTitles || {};
+  book.chapterKinds = book.chapterKinds || {};
+  let gone = [];
+  if (chId) {
+    if (!book.chapterOrder.includes(chId)) {
+      // back where it stood: after the nearest chapter before it that's still here
+      const before = meta.chapterOrder.slice(0, meta.chapterOrder.indexOf(chId)).reverse().find((c) => book.chapterOrder.includes(c));
+      book.chapterOrder.splice(before ? book.chapterOrder.indexOf(before) + 1 : 0, 0, chId);
+      if ((meta.chapterTitles || {})[chId]) book.chapterTitles[chId] = meta.chapterTitles[chId];
+      if ((meta.chapterKinds || {})[chId]) book.chapterKinds[chId] = meta.chapterKinds[chId];
+    }
+    chapterHTML[chId] = byId[chId];
+  } else {
+    gone = book.chapterOrder.filter((c) => !meta.chapterOrder.includes(c));
+    book.chapterOrder = [...meta.chapterOrder];
+    for (const c of book.chapterOrder) {
+      chapterHTML[c] = byId[c];
+      if ((meta.chapterTitles || {})[c] !== undefined) book.chapterTitles[c] = meta.chapterTitles[c]; else delete book.chapterTitles[c];
+      if ((meta.chapterKinds || {})[c] !== undefined) book.chapterKinds[c] = meta.chapterKinds[c]; else delete book.chapterKinds[c];
+    }
+  }
+  wordCache = {};
+  for (const c of chId ? [chId] : book.chapterOrder) await persistChapter(c);
+  await saveMeta();
+  // chapters added since: out of the book, their words in the snapshot just taken
+  for (const c of gone) { delete chapterHTML[c]; await window.neo.deleteChapter(book.id, c); }
+  showDarlingsAgain();
+  switchTab('manuscript');
+  renderChapters();
+  const el = chId && document.querySelector(`.chapter[data-id="${chId}"]`);
+  if (el) { el.scrollIntoView({ block: 'start' }); focusChapterStart(chId); breakRun = 1; } // ⌘Z, before any typing, undoes it
+  else $('#paper-scroll').scrollTop = 0;
+  updateCounters();
+  scheduleNavRefresh();
+  const undo = IS_MAC ? '⌘Z' : 'Ctrl+Z';
+  toast(chId ? t('Chapter restored from {when}. {undo} undoes it; the text it replaced is in a snapshot too.', { when: snapWhen(snap.at), undo })
+    : t('Book restored from {when}. {undo} undoes it; the book as it was is in a snapshot too.', { when: snapWhen(snap.at), undo }), 7000);
+}
+
+// Esc on a snapshot goes back to the darlings (first, before the editor's
+// own Esc, which would close the book)
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || e.isComposing || !snapShown || currentTab !== 'darlings') return;
+  if (document.querySelector('.modal-backdrop:not([hidden]), .pop-menu') || !$('#searchbar').hidden) return;
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  showDarlingsAgain();
+}, true);
+
+/* ================================================================== */
 /*  REFRESH — picking up what another device wrote                     */
 /*  A library shared over iCloud or Syncthing changes underneath NEO.  */
 /*  Whenever NEO comes back into view it looks again: a chapter that   */
@@ -10150,12 +13035,13 @@ let refreshing = false;
 async function refreshFromDisk() {
   if (refreshing || shelfExport) return;
   refreshing = true;
+  diskWordsAt = Date.now();
   bookMetaCache.clear(); // whatever another device wrote, the next redraw reads
   try {
     if (!book) {
       if (library && !$('#bookshelf-view').hidden) {
         const gen = libraryGeneration;
-        const lib = await window.neo.readLibrary();
+        const lib = applyDeviceLook(await window.neo.readLibrary());
         // a change made here while that read was out (a new shelf, a rename)
         // is newer than what came back: taking it would undo the change,
         // and the next save would make that stick. Look again next time.
@@ -10248,7 +13134,7 @@ async function refreshFromDisk() {
         }
         if (metaSig(book) !== savedMetaSig) scheduleMetaSave();
         if (!book.chapterOrder.includes(currentChapterId)) currentChapterId = null;
-        undoStack = []; // snapshots of the old structure must not replay over the new one
+        undoStack = []; redoStack = []; // snapshots of the old structure must not replay over the new one
         restructured = true;
       }
     }
@@ -10331,6 +13217,7 @@ async function refreshFromDisk() {
       if (restructured) {
         const show = (el, text) => { if (el.textContent !== text) el.textContent = text; };
         show($('#tp-title'), isUntitled(book.title) ? '' : book.title);
+        showTitleStyle();
         show($('#tp-subtitle'), book.subtitle || '');
         show($('#tp-author'), book.author || t('Anonymous'));
         $$('.tab[data-tab="notes"]')[0].textContent = tabName('notes');
@@ -10367,6 +13254,7 @@ async function refreshFromDisk() {
   } catch (err) {
     console.error(err);
   } finally {
+    diskWordsAt = Date.now();
     refreshing = false;
   }
 }
@@ -10391,8 +13279,13 @@ async function backToShelf() {
   tabPlaces = {};
   book = null;
   bookReadOnly = false;
+  showWindowTitle();
+  snapShown = null;
+  snapCache = null;
+  sideCardsKey = '';
+  if ($('#side-cards')) $('#side-cards').innerHTML = '';
   currentChapterId = null;
-  undoStack = [];
+  undoStack = []; redoStack = [];
   $('#editor-view').hidden = true;
   $('#bookshelf-view').hidden = false;
   applyBright();
@@ -10410,6 +13303,7 @@ $('#back-to-shelf').onclick = backToShelf;
 /* ================================================================== */
 
 let undoStack = [];
+let redoStack = []; // what structural undos took back, newest last
 
 // remember where the caret is — paragraph number plus offset within that
 // paragraph, so even a caret in an EMPTY paragraph has an exact address
@@ -10537,10 +13431,12 @@ function sealUndoOnEdit() {
   const top = undoStack[undoStack.length - 1];
   if (top && top.armed) sealUndo(top);
 }
-function snapshotStructure(label, opts) {
-  if (!book) return;
-  sealUndo(undoStack[undoStack.length - 1]);
-  const snap = {
+// how many actions ⌘Z can take back, one after another
+const UNDO_DEPTH = 50;
+// the book's structure as it stands: what an undo puts back (and what a redo
+// is, taken at the moment of the undo)
+function captureStructure(label, opts) {
+  return {
     armed: false, // the action's own edits, in this same moment, don't seal it
     label,
     rejoin: !!(opts && opts.rejoin),
@@ -10557,15 +13453,23 @@ function snapshotStructure(label, opts) {
     darlings: JSON.parse(JSON.stringify(darlings)),
     stickies: JSON.parse(JSON.stringify(stickies))
   };
+}
+function snapshotStructure(label, opts) {
+  if (!book) return;
+  maybeDailySnapshot();
+  sealUndo(undoStack[undoStack.length - 1]);
+  const snap = captureStructure(label, opts);
   undoStack.push(snap);
+  redoStack = []; // a new action: what was undone before it can't come back over it
   setTimeout(() => { snap.armed = true; }, 30);
-  if (undoStack.length > 10) undoStack.shift();
+  if (undoStack.length > UNDO_DEPTH) undoStack.shift();
 }
 
-async function structuralUndo() {
+async function structuralUndo(fromRedo) {
   const snap = undoStack.pop();
   if (!snap || !book) return;
   sealUndo(snap); // nothing typed since: the state now is the action's own
+  const forward = captureStructure(fromRedo ? 'undo of a redo' : 'redo'); // the state this undo leaves, for Redo
   const after = snap.after;
   // Chapter by chapter: one the action changed and nothing touched since
   // goes back; one only typed in since keeps its words; one both changed
@@ -10625,6 +13529,23 @@ async function structuralUndo() {
   restoreCaret(snap.caret); // back to work, no announcement
   if (snap.rejoin) rejoinAtCaret();
   resetNativeUndo();
+  // an undo that sets writing aside says where it went (#377): a chapter that
+  // went back looks, to the writer, like words that vanished
+  if (displaced.length) toast(t('Words you wrote since went to Darlings, so nothing is lost'), 8000);
+  // what this undo took back can be put back: ⇧⌘Z (Ctrl+Shift+Z, or Ctrl+Y)
+  sealUndo(forward);
+  (fromRedo ? undoStack : redoStack).push(forward);
+  if (undoStack.length > UNDO_DEPTH) undoStack.shift();
+  if (redoStack.length > UNDO_DEPTH) redoStack.shift();
+}
+
+// Redo of an undo made outside the engine's own history: the state the undo
+// left is put back the way an undo puts one back, so it can be undone again
+async function structuralRedo() {
+  const snap = redoStack.pop();
+  if (!snap || !book) return;
+  undoStack.push(snap);
+  await structuralUndo(true);
 }
 
 // after undoing a double-Enter break, close the split the gesture made:
@@ -10678,6 +13599,18 @@ function rejoinAtCaret() {
   syncChapter(body, chId);
 }
 
+// ⇧⌘Z (Ctrl+Shift+Z, and Ctrl+Y outside the Mac) puts back what ⌘Z took back
+// outside the engine's history. Any typing, anywhere, ends it: a redo never
+// lands over writing made after the undo.
+document.addEventListener('input', () => { redoStack = []; }, true);
+document.addEventListener('keydown', (e) => {
+  const key = e.key.toLowerCase();
+  const redo = (e.metaKey || e.ctrlKey) && ((e.shiftKey && key === 'z') || (e.ctrlKey && !e.metaKey && !e.shiftKey && key === 'y' && !IS_MAC));
+  if (!redo || $('#editor-view').hidden || !book || !redoStack.length) return;
+  e.preventDefault();
+  structuralRedo();
+}, true);
+
 document.addEventListener('keydown', (e) => {
   if (!(e.metaKey || e.ctrlKey) || e.shiftKey || e.key.toLowerCase() !== 'z') return;
   if ($('#editor-view').hidden || !book || !undoStack.length) return;
@@ -10712,13 +13645,19 @@ function readVoice() {
     by((v) => v.default) || voices[0] || null;
 }
 async function readVoicesReady() {
-  if (window.speechSynthesis.getVoices().length) return true;
+  const synth = window.speechSynthesis;
+  if (synth.getVoices().length) return true;
+  // Some systems (Linux's speech-dispatcher) bring their voices a moment after
+  // the first ask: wait for them, up to four seconds, rather than say there are none
   await new Promise((resolve) => {
-    const done = () => resolve();
-    window.speechSynthesis.addEventListener('voiceschanged', done, { once: true });
-    setTimeout(done, 1500);
+    let waited = 0;
+    const poll = setInterval(() => {
+      waited += 100;
+      if (synth.getVoices().length || waited >= 4000) { clearInterval(poll); resolve(); }
+    }, 100);
+    synth.addEventListener('voiceschanged', () => { if (synth.getVoices().length) { clearInterval(poll); resolve(); } }, { once: true });
   });
-  return window.speechSynthesis.getVoices().length > 0;
+  return synth.getVoices().length > 0;
 }
 
 // The paragraphs to read, from one, in order: the rest of its editor, then
@@ -10783,7 +13722,9 @@ async function toggleReadAloud() {
     p = body && body.querySelector('p');
   }
   if (!p) return;
-  if (!(await readVoicesReady())) { toast(t('Read aloud needs a voice on this computer')); return; }
+  // (no voice found after the wait: try the system's own default anyway, and
+  // say so only if the engine itself answers that it has none)
+  await readVoicesReady();
   const paras = readParasFrom(p);
   // start at the beginning of the sentence the caret is in
   const first = readSentences(p, 0).find(([a, b]) => from >= a && from < b);
@@ -10817,7 +13758,11 @@ async function toggleReadAloud() {
       }
     };
     u.onend = () => next();
-    u.onerror = (ev) => { if (ev.error !== 'interrupted' && ev.error !== 'canceled') stopReadAloud(false); };
+    u.onerror = (ev) => {
+      if (ev.error === 'interrupted' || ev.error === 'canceled') return;
+      if (!voice && ['synthesis-unavailable', 'synthesis-failed', 'voice-unavailable', 'language-unavailable'].includes(ev.error)) toast(t('Read aloud needs a voice on this computer'));
+      stopReadAloud(false);
+    };
     window.speechSynthesis.speak(u);
   };
   window.speechSynthesis.cancel();
@@ -10848,8 +13793,8 @@ document.addEventListener('keydown', (e) => {
   const cmd = e.metaKey || e.ctrlKey;
   // on Linux, Ctrl+Shift+U belongs to the input method (it types a Unicode
   // character by its code), so Read Aloud there is Ctrl+Shift+K (#287)
-  if (cmd && e.shiftKey && !e.altKey && (e.code === 'KeyU' || (IS_LINUX && e.code === 'KeyK'))) {
-    if (!book || $('#editor-view').hidden) return;
+  if (cmd && e.shiftKey && !e.altKey && e.code === (IS_LINUX ? 'KeyK' : 'KeyU')) {
+    if (!book || $('#editor-view').hidden || !moreOn()) return;
     e.preventDefault();
     e.stopPropagation();
     toggleReadAloud();
@@ -11094,10 +14039,17 @@ $('#search-close').onclick = closeSearch;
 /* ================================================================== */
 
 const escHtml = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+// …and for a value between quotation marks (an attribute)
+const escAttr = (s) => escHtml(s).replace(/"/g, '&quot;');
 
 // Turn parsed manuscripts into books on a shelf — used by the file picker
 // and by dropping files from Finder straight onto a shelf.
 async function addImportedBooks(results, shelf) {
+  // a Fountain or Final Draft file is a script: behind Show More Features
+  if (!moreOn()) {
+    results = results.filter((r) => !r.script);
+    if (!results.length) { toast(t('No .docx, .txt, or .md files in that drop')); return; }
+  }
   shelf = shelf || shelvesFor(currentAuthor().id)[0] || library.shelves[0];
   let ok = 0;
   let scripts = 0;
@@ -11123,12 +14075,7 @@ async function addImportedBooks(results, shelf) {
     meta.chapterTitles = {};
     for (const ch of r.chapters) {
       const chId = 'ch-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
-      const html = ch.paras.map((p) => {
-        if (p.scene) return '<p class="scene-break">***</p>';
-        // hyphens set as dialogue dashes, the same as typing them
-        return `<p>${importedEmphasis(escHtml(dialogueDashes(p.text || '', dashStyle())))}</p>`;
-      }).join('') || '<p><br></p>';
-      await window.neo.writeChapter(meta.id, chId, html);
+      await window.neo.writeChapter(meta.id, chId, importedChapterHTML(ch));
       if (ch.title) meta.chapterTitles[chId] = ch.title;
       if (ch.role) meta[ch.role] = chId;
       meta.chapterOrder.push(chId);
@@ -11143,6 +14090,89 @@ async function addImportedBooks(results, shelf) {
   if (!$('#bookshelf-view').hidden) renderShelves();
   if (ok) toast(t('{n} books imported onto “{shelf}” — chapters and scene breaks detected', { n: ok, shelf: shelf.name }), 6000);
   else if (scripts) toast(t('{n} scripts imported onto “{shelf}”', { n: scripts, shelf: shelf.name }), 6000);
+}
+
+// One imported chapter's paragraphs as a chapter body
+function importedChapterHTML(ch) {
+  return ch.paras.map((p) => {
+    if (p.scene) return '<p class="scene-break">***</p>';
+    // hyphens set as dialogue dashes, the same as typing them
+    return `<p>${importedEmphasis(escHtml(dialogueDashes(p.text || '', dashStyle())))}</p>`;
+  }).join('') || '<p><br></p>';
+}
+
+// Files brought into the open book as chapters (#178), before the chapter
+// `beforeId` (at the end when there is none). The words are new files, so
+// nothing already in the book is rewritten. A structural undo takes the
+// chapters out again, and the words are still in the files they came from.
+async function importChaptersIntoBook(results, beforeId) {
+  if (!book || isScript()) return 0;
+  const bookId = book.id;
+  const adding = [];
+  for (const r of results) {
+    if (r.error) { toast(t('Couldn’t import {name}: {error}', { name: r.name, error: r.error }), 6000); continue; }
+    if (r.script) { toast(t('Couldn’t import {name}: {error}', { name: r.name, error: t('a script can’t become chapters of a book') }), 6000); continue; }
+    r.chapters.forEach((ch) => {
+      // a file of one chapter is usually named for it: the title its first
+      // line gave (the parser harvests it as the book's) names the chapter;
+      // in a file of several, that title was the old book's
+      const title = ch.title || (r.chapters.length === 1 && r.title) || '';
+      adding.push({ title, html: importedChapterHTML(ch) });
+    });
+  }
+  if (!adding.length || !book || book.id !== bookId) return 0;
+  snapshotStructure('chapters imported');
+  let at = beforeId ? book.chapterOrder.indexOf(beforeId) : -1;
+  if (at < 0) at = book.chapterOrder.length;
+  const ids = [];
+  try {
+    for (const a of adding) {
+      const chId = 'ch-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
+      chapterHTML[chId] = a.html;
+      ids.push(chId);
+      // every chapter file is on disk before book.json names it
+      await persistChapter(chId);
+    }
+  } catch (err) {
+    window.neo.logError('import chapters: ' + (err && err.message || err));
+    for (const chId of ids) delete chapterHTML[chId];
+    undoStack.pop();
+    toast(t('Couldn’t import the chapters: {error}', { error: String(err && err.message || err) }), 6000);
+    return 0;
+  }
+  if (!book || book.id !== bookId) return 0;
+  book.chapterTitles = book.chapterTitles || {};
+  adding.forEach((a, i) => { if (a.title) book.chapterTitles[ids[i]] = a.title; });
+  book.chapterOrder.splice(at, 0, ...ids);
+  await saveMeta();
+  renderChapters();
+  if (currentTab === 'outline') renderOutline();
+  updateCounters();
+  toast(t('{n} chapters added to “{title}”', { n: ids.length, title: book.title || '' }), 6000);
+  return ids.length;
+}
+
+// Files dropped from Finder or Explorer (on the Chapters pane, or the
+// Outline) become chapters before `beforeId`
+async function importDroppedChapters(files, beforeId) {
+  const paths = [...files]
+    .map((f) => { try { return window.neo.pathForFile(f); } catch { return null; } })
+    .filter((p) => p && /\.(docx|txt|md)$/i.test(p));
+  if (!paths.length) { toast(t('No .docx, .txt, or .md files in that drop')); return; }
+  const bookId = book.id;
+  toast(t('Importing…'));
+  const results = await window.neo.importFiles(paths);
+  if (book && book.id === bookId) await importChaptersIntoBook(results, beforeId);
+}
+
+// File → Import Chapters…: after the chapter you're in, or at the end
+async function importChapters() {
+  if (!book || isScript() || $('#editor-view').hidden) return;
+  const bookId = book.id;
+  const results = await window.neo.importPick({ chapters: true });
+  if (!results.length || !book || book.id !== bookId) return;
+  const at = currentChapterId ? book.chapterOrder.indexOf(currentChapterId) + 1 : book.chapterOrder.length;
+  await importChaptersIntoBook(results, book.chapterOrder[at]);
 }
 
 // **bold**, *italic* and _italic_ from an imported file, the way Markdown
@@ -11277,7 +14307,7 @@ function capitalSlips(el) {
     const w = document.createTreeWalker(p, NodeFilter.SHOW_TEXT);
     let n;
     while ((n = w.nextNode())) {
-      if (n.parentElement && n.parentElement.closest('.ghost, .ph-mark')) continue;
+      if (n.parentElement && n.parentElement.closest('.ghost, .ph-mark, .fn')) continue;
       segs.push({ node: n, at: text.length });
       text += n.data;
     }
@@ -11364,7 +14394,7 @@ function toggleSpellcheck() {
 const SPELL_LANGUAGE_NAMES = {
   'en-US': t('US English'), 'en-GB': t('UK English'), 'en-CA': t('Canadian English'),
   'en-AU': t('Australian English'), fr: t('French'), es: t('Spanish'), de: t('German'),
-  nl: t('Dutch'), pl: t('Polish'), 'pt-BR': t('Brazilian Portuguese'), ro: t('Romanian'), ru: t('Russian'), hu: t('Hungarian')
+  nl: t('Dutch'), pl: t('Polish'), 'pt-BR': t('Brazilian Portuguese'), ro: t('Romanian'), ru: t('Russian'), hu: t('Hungarian'), sv: t('Swedish')
 };
 async function changeSpellLanguage(code) {
   const ok = await window.neo.setSpellLanguage(code);
@@ -11489,15 +14519,68 @@ function showSpellMenu(x, y, word, suggestions, actions) {
   const r = menu.getBoundingClientRect();
   menu.style.left = Math.min(x, window.innerWidth - r.width - 10) + 'px';
   menu.style.top = Math.min(y + 4, window.innerHeight - r.height - 10) + 'px';
+  const back = document.activeElement; // where the writer was, to go back to
   const close = (ev) => {
     if (menu.contains(ev.target)) return;
     menu.remove();
     document.removeEventListener('mousedown', close, true);
+    document.removeEventListener('keydown', arrows, true);
+  };
+  // the keys do it too, so no hand leaves the keyboard: ↓ and ↑ walk the
+  // choices, Enter takes the one on, Esc closes the menu and goes back to the text
+  let on = -1;
+  const arrows = (ev) => {
+    if (!menu.isConnected) { document.removeEventListener('keydown', arrows, true); return; }
+    if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
+      const choices = [...menu.querySelectorAll('button:not(:disabled)')];
+      if (!choices.length) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      on = ev.key === 'ArrowDown' ? (on + 1) % choices.length : (on <= 0 ? choices.length : on) - 1;
+      choices[on].focus();
+    } else if (ev.key === 'Escape') {
+      ev.preventDefault();
+      ev.stopPropagation();
+      menu.remove();
+      document.removeEventListener('mousedown', close, true);
+      document.removeEventListener('keydown', arrows, true);
+      if (back && back.focus) back.focus({ preventScroll: true });
+    }
   };
   document.addEventListener('mousedown', close, true);
+  document.addEventListener('keydown', arrows, true);
 }
 
 let typewriterEnabled = false;
+let nbspMarksEnabled = false;
+
+// ---- look up rules:
+// macOS shows the system dictionary for a selected word; the menu only makes sense for one word,
+// never for a phrase or a whole paragraph (#179).
+const LOOK_UP_MAX_WORD = 60;
+function lookUpWord(text) {
+  const word = (text || '').trim();
+  if (!word || word.length > LOOK_UP_MAX_WORD) return null;
+  return /\s/.test(word) ? null : word;
+}
+// ---- end of look up rules ----
+
+// macOS: a selected word in the manuscript or the notes gets the system "Look Up" — the panel
+// Safari and Books show (#179). The listener runs in the bubble phase, after the spellcheck menu,
+// and stands down when any other menu already answered the right-click.
+document.addEventListener('contextmenu', (e) => {
+  if (window.neo.platform !== 'darwin' || e.defaultPrevented || !moreOn()) return;
+  const editor = e.target.closest && e.target.closest('.chapter-body, #aux-editor');
+  if (!editor) return;
+  const sel = window.getSelection();
+  const word = sel && sel.rangeCount && !sel.isCollapsed ? lookUpWord(sel.toString()) : null;
+  if (!word) return;
+  e.preventDefault();
+  popMenu(e.clientX, e.clientY, [{ label: t('Look Up “{word}”', { word }), value: 'lookup' }]).then((choice) => {
+    if (choice === 'lookup') window.neo.lookUpText();
+  });
+});
+
 // The page needs empty room beneath its last line, or the caret can't be held
 // at the centre once the end of the draft scrolls into view (body.typewriter
 // deepens #paper's bottom margin; see styles.css). Only as much as the last
@@ -11522,6 +14605,19 @@ function typewriterRoom() {
 }
 new ResizeObserver(() => typewriterRoom()).observe($('#chapters'));
 window.addEventListener('resize', typewriterRoom);
+function applyNbspMarks() {
+  if (window.neo.nbspMarksState) window.neo.nbspMarksState(nbspMarksEnabled); // the Format menu's tick
+  paintNonBreakingMarks();
+}
+function toggleNbspMarks() {
+  nbspMarksEnabled = !nbspMarksEnabled;
+  library.nbspMarks = nbspMarksEnabled;
+  writeLibrary(library);
+  applyNbspMarks();
+  toast(nbspMarksEnabled
+    ? t('Non-breaking marks ON — the spaces and hyphens that hold a line together are tinted')
+    : t('Non-breaking marks off'));
+}
 function toggleTypewriter() {
   typewriterEnabled = !typewriterEnabled;
   library.typewriter = typewriterEnabled;
@@ -11600,6 +14696,7 @@ let viewStateSent = '';
 // the writer turns it down). The shelf goes with writing.
 const brightAside = () => !!book && !$('#editor-view').hidden && currentTab !== 'manuscript';
 function brightNow() {
+  if (!moreOn()) return brightAside() || SYSTEM_CONTRAST.matches; // the defaults
   if (brightAside()) return library.uiBrightAside === undefined ? true : !!library.uiBrightAside;
   return library.uiBright === undefined ? SYSTEM_CONTRAST.matches : !!library.uiBright;
 }
@@ -11916,7 +15013,7 @@ function openStats() {
   bd.className = 'modal-backdrop';
   bd.innerHTML = `
     <div class="modal" style="width:${hasBook ? 580 : 380}px">
-      <h2 style="font-size:17px">${hasBook ? t('{title} — progress', { title: escHtml(book.title) }) : t('Goals')}</h2>
+      <h2 style="font-size:17px">${hasBook ? t('{title} — progress', { title: escHtml(shownTitle(book.title)) }) : t('Goals')}</h2>
       ${hasBook ? `
       <div class="stats-nums">
         <div><div class="big">${fmtNum(total)}</div><div class="lbl">${t('total words')}</div></div>
@@ -12026,12 +15123,12 @@ function applyFonts() {
   // the system's "Increase contrast" turns it on too, until the writer
   // chooses in the View menu
   applyBright();
-  // View → Interface Size: everything but the page
-  const uiZoom = [1, 1.25, 1.5, 2, 2.5, 3].includes(library.uiZoom) ? library.uiZoom : 1;
+  // View → Interface Size: everything but the page, in tenths (#364)
+  const uiZoom = moreOn() ? snapZoom(library.uiZoom) : 1;
   document.documentElement.style.setProperty('--ui-zoom', uiZoom);
   document.documentElement.classList.toggle('ui-zoomed', uiZoom > 1);
   if (window.neo.uiZoomState) window.neo.uiZoomState(uiZoom);
-  const size = Math.min(22, Math.max(14, library.editorFontSize || 17));
+  const size = Math.min(EDITOR_SIZE_MAX, Math.max(EDITOR_SIZE_MIN, library.editorFontSize || 17));
   document.documentElement.style.setProperty('--editor-size', size + 'px');
   applyPageZoom();
 }
@@ -12149,14 +15246,21 @@ function keepReadingPlace(change, at) {
 
 function setPageZoom(next, at) {
   // up to 300%: on a large monitor 160% still read small. The page itself
-  // never grows past the window (max-width in styles.css), only the type does.
-  next = Math.min(3, Math.max(0.75, next));
+  // never grows past the window (max-width in styles.css), only the type does;
+  // in the Pages view a page keeps its shape, and a window too small for it scrolls.
+  const range = pageZoomRange();
+  next = Math.min(range.max, Math.max(range.min, next));
   if (next === activePageZoom()) return;
   rememberZoom(pageZoomKey(), next);
-  keepReadingPlace(() => document.documentElement.style.setProperty('--page-zoom', next), at);
+  keepReadingPlace(() => {
+    document.documentElement.style.setProperty('--page-zoom', next);
+    fitSpread(); // two pages to a row, or back to one
+    queuePages(true);
+  }, at);
   updateZoomDisplay();
 }
 let cardWheel = 0;
+let pageWheel = 0;
 $('#editor-view').addEventListener('wheel', (e) => {
   if (!e.ctrlKey) return;
   e.preventDefault();
@@ -12166,12 +15270,24 @@ $('#editor-view').addEventListener('wheel', (e) => {
     if (Math.abs(cardWheel) > 40) { stepCardZoom(cardWheel < 0 ? 1 : -1); cardWheel = 0; }
     return;
   }
-  setPageZoom(activePageZoom() * Math.exp(-e.deltaY * 0.005), { x: e.clientX, y: e.clientY });
+  // …and the page a tenth at a time (#336: a smooth pinch left it at 101%)
+  pageWheel += e.deltaY;
+  if (Math.abs(pageWheel) > 40) {
+    setPageZoom(tenth(activePageZoom() + (pageWheel < 0 ? 0.1 : -0.1)), { x: e.clientX, y: e.clientY });
+    pageWheel = 0;
+  }
+}, { passive: false });
+let shelfWheel = 0;
+$('#bookshelf-view').addEventListener('wheel', (e) => {
+  if (!e.ctrlKey) return;
+  e.preventDefault();
+  shelfWheel += e.deltaY;
+  if (Math.abs(shelfWheel) > 40) { stepShelfZoom(shelfWheel < 0 ? 1 : -1); shelfWheel = 0; }
 }, { passive: false });
 
 // zoom control in the bottom bar: buttons, click-to-reset, and scroll
-$('#zoom-in').onclick = () => (boardShowing() ? stepCardZoom(1) : setPageZoom(activePageZoom() + 0.1));
-$('#zoom-out').onclick = () => (boardShowing() ? stepCardZoom(-1) : setPageZoom(activePageZoom() - 0.1));
+$('#zoom-in').onclick = () => (boardShowing() ? stepCardZoom(1) : setPageZoom(tenth(activePageZoom() + 0.1)));
+$('#zoom-out').onclick = () => (boardShowing() ? stepCardZoom(-1) : setPageZoom(tenth(activePageZoom() - 0.1)));
 $('#zoom-level').onclick = () => (boardShowing() ? stepCardZoom(0) : setPageZoom(1));
 $('#zoom-control').addEventListener('wheel', (e) => {
   e.preventDefault();
@@ -12226,24 +15342,29 @@ function shortcutSections() {
   return bookShortcutSections();
 }
 function bookShortcutSections() {
+  // the keys of features behind File → Show More Features show with them
+  const more = moreOn();
   return [
     { title: tk('Writing'), rows: [
       [tk('Enter ×2'), tk('Insert a section break')],
       [tk('Enter ×3'), tk('Start a new chapter')],
       [K('⇧Enter', 'Shift+Enter'), tk('A paragraph with no indent'), tk('Again for another; Enter goes back to prose.')],
-      [K('⌘⇧Enter', 'Ctrl+Shift+Enter'), tk('Start or continue a poetry paragraph'), tk('Also works from a chapter heading.')],
+      ...(more ? [[K('⌘⇧Enter', 'Ctrl+Shift+Enter'), tk('Start or continue a poetry paragraph'), tk('Also works from a chapter heading.')]] : []),
       [KPH, tk('Insert a placeholder note')],
+      ...(more ? [[KFN, tk('Add a footnote'), tk('Type the note, then Enter to go back to writing. Click its number to change it.')]] : []),
       [KDA, tk('Move selected text to Darlings')],
-      [K('⌘⇧U', IS_LINUX ? 'Ctrl+Shift+K' : 'Ctrl+Shift+U'), tk('Read aloud from the cursor'), tk('Again, Esc or any key stops it. Uses your computer’s own voice.')]
+      ...(more ? [[K('⌘⇧U', IS_LINUX ? 'Ctrl+Shift+K' : 'Ctrl+Shift+U'), tk('Read aloud from the cursor'), tk('Again, Esc or any key stops it. Uses your computer’s own voice.')]] : [])
     ] },
     { title: tk('Formatting'), rows: [
-      [['*…*', '**…**', '***…***'], tk('Italic, bold, the Markdown way'), tk('Typed around a word (or pasted). Undo right after keeps the asterisks. Format → Markdown Emphasis turns it off.')],
+      ...(more ? [[['*…*', '**…**', '***…***'], tk('Italic, bold, the Markdown way'), tk('Typed around a word (or pasted). Undo right after keeps the asterisks. Format → Markdown Emphasis turns it off.')]] : []),
       [K('⌘U', 'Ctrl+U'), tk('Underline')],
-      [K('⌘⇧S', 'Ctrl+Shift+S'), tk('Strikethrough'), tk('Or ~~…~~ around the words.')],
-      [K('⌘⇧L', 'Ctrl+Shift+L'), tk('Align paragraph left')],
-      [K('⌘⇧C', 'Ctrl+Shift+C'), tk('Center paragraph')],
-      [K('⌘⇧R', 'Ctrl+Shift+R'), tk('Align paragraph right')],
-      [K('⌘⇧J', 'Ctrl+Shift+J'), tk('Justify paragraph')],
+      [K('⌘⇧S', 'Ctrl+Shift+S'), tk('Strikethrough'), more ? tk('Or ~~…~~ around the words.') : undefined],
+      ...(more ? [
+        [K('⌘⇧L', 'Ctrl+Shift+L'), tk('Align paragraph left')],
+        [K('⌘⇧C', 'Ctrl+Shift+C'), tk('Center paragraph')],
+        [K('⌘⇧R', 'Ctrl+Shift+R'), tk('Align paragraph right')],
+        [K('⌘⇧J', 'Ctrl+Shift+J'), tk('Justify paragraph')]
+      ] : []),
       [K('⌘+', 'Ctrl++'), tk('Larger text')],
       [K('⌘−', 'Ctrl+−'), tk('Smaller text')],
       [K('⌘0', 'Ctrl+0'), tk('Reset text size and page zoom')]
@@ -12259,6 +15380,7 @@ function bookShortcutSections() {
     ] },
     { title: tk('App & files'), rows: [
       [KHELP, tk('Keyboard shortcuts')],
+      [K('⌘S', 'Ctrl+S'), tk('Take a snapshot of the book'), tk('NEO saves as you type; a snapshot keeps the book as it stands now. They’re on the Darlings tab.')],
       [K('⌘,', 'Ctrl+,'), tk('Goals and writing sprints')],
       [K('⌘⇧I', 'Ctrl+Shift+I'), tk('Import manuscripts')],
       [K('⌘E', 'Ctrl+E'), tk('Email a draft to yourself')]
@@ -12266,11 +15388,13 @@ function bookShortcutSections() {
     { title: tk('View & window'), rows: [
       [[K('⌘⇧F', 'Ctrl+Shift+F'), K('⌘Enter', 'Ctrl+Enter')], tk('Toggle full screen')],
       [K('⌘⇧T', 'Ctrl+Shift+T'), tk('Toggle typewriter scrolling')],
-      [K('⌘⇧O', 'Ctrl+Shift+O'), tk('Cycle focus mode'), tk('Off → paragraph → sentence → off.')],
+      ...(more ? [[K('⌘⇧O', 'Ctrl+Shift+O'), tk('Cycle focus mode'), tk('Off → paragraph → sentence → off.')]] : []),
       [IS_MAC ? '⌥⌘↓' : ['Ctrl+Alt+↓', 'Ctrl+Page Down'], tk('Go to the next chapter')],
       [IS_MAC ? '⌥⌘↑' : ['Ctrl+Alt+↑', 'Ctrl+Page Up'], tk('Go to the previous chapter')],
-      [K('⌥⌘→', 'Ctrl+Alt+→'), tk('Go to the next tab'), tk('Manuscript, Notes, Outline, Darlings, then round again.')],
-      [K('⌥⌘←', 'Ctrl+Alt+←'), tk('Go to the previous tab')],
+      ...(more ? [
+        [K('⌥⌘→', 'Ctrl+Alt+→'), tk('Go to the next tab'), tk('Manuscript, Notes, Outline, Darlings, then round again.')],
+        [K('⌥⌘←', 'Ctrl+Alt+←'), tk('Go to the previous tab')]
+      ] : []),
       [['F6', K('⌃Tab', 'Ctrl+Tab')], tk('Move between the page, the chapters, the notes and the bottom bar'), tk('Add Shift to go back. Esc returns to the page. On the shelf: the books, then the header.')],
       ...(IS_MAC ? [
         ['⌘H', tk('Hide NEO')],
@@ -12389,8 +15513,9 @@ function parasFromHtml(html) {
     const poetry = p.classList.contains('poetry');
     const flush = !poetry && p.classList.contains('flush');
     const align = (p.style && p.style.textAlign) || '';
-    const runs = paraRuns(p.innerHTML, true).filter((r) => r.text);
+    const runs = paraRuns(p.innerHTML, true).filter((r) => r.text || r.fn !== undefined);
     const inner = runs.map((r) => runHtml(r)).join('');
+    p.querySelectorAll('.fn').forEach((f) => f.remove());
     return {
       sceneBreak,
       poetry,
@@ -12482,6 +15607,606 @@ function bookExportData() {
   };
 }
 
+/* ================================================================== */
+/*  MANUSCRIPT FORMAT                                                  */
+/*  File → Export → Manuscript Format…: the open book the way agents   */
+/*  and editors ask for it, as Word or PDF. The pages are              */
+/*  manuscript.js's (window.NeoManuscript); this is the dialog, which  */
+/*  remembers the writer's contact details (library.manuscript, every  */
+/*  book) and the byline and header (book.manuscript, this book), and  */
+/*  the book's chapters handed over as runs. Desktop only.             */
+/* ================================================================== */
+
+// What a submission carries: the story (chapters, a prologue, an
+// epilogue, parts) and an epigraph. The copyright, dedication, contents,
+// acknowledgments and about-the-author pages stay out.
+function manuscriptSections() {
+  const { sections } = exportChapters();
+  return sections.filter((s) => s.kind === 'chapter' || s.kind === 'part' || s.kind === 'epigraph').map((s) => ({
+    kind: s.kind, heading: s.heading || '', partTitle: s.partTitle || '',
+    paras: s.paras.map((p) => ({ sceneBreak: p.sceneBreak, poetry: p.poetry, flush: p.flush, align: p.align, runs: p.runs || [] })),
+    words: s.paras.reduce((n, p) => n + (p.sceneBreak ? 0 : countWords(p.text || '')), 0)
+  }));
+}
+// the name on the book, as NEO knows it ("Anonymous", the screen's stand-in
+// for no name, is no byline)
+function manuscriptByline() {
+  const real = (x) => (x && String(x).trim() !== t('Anonymous') ? String(x).trim() : '');
+  return real(book.author) || real(library.authorName) || '';
+}
+// what the dialog starts with, from what was kept
+function manuscriptDefaults() {
+  const lib = library.manuscript || {};
+  const mine = (book && book.manuscript) || {};
+  const byline = mine.byline || manuscriptByline();
+  return {
+    name: lib.name != null ? lib.name : (library.authorName || ''),
+    address: lib.address || '', phone: lib.phone || '',
+    email: lib.email != null ? lib.email : (library.emailAddress || ''),
+    font: lib.font === 'courier' ? 'courier' : 'times',
+    end: lib.end !== false,
+    byline,
+    headerName: mine.headerName || NeoManuscript.surnameOf(byline),
+    headerTitle: mine.headerTitle || String(book.title || t('Untitled')).toLocaleUpperCase(writingLanguage())
+  };
+}
+function manuscriptModel(v, sections) {
+  const words = sections.reduce((n, s) => n + s.words, 0);
+  const shown = NeoManuscript.roundWords(words);
+  const chapters = sections.filter((s) => s.kind === 'chapter');
+  return {
+    title: book.title || t('Untitled'), byline: v.byline, headerName: v.headerName, headerTitle: v.headerTitle,
+    contact: { name: v.name, lines: [...String(v.address || '').split(/\r?\n/), v.phone, v.email] },
+    wordsText: t('about {n} words', { n: shown.toLocaleString(NeoI18n.getLocale()) }),
+    byText: v.byline ? t('by {name}', { name: v.byline }) : '',
+    endText: v.end ? t('END') : '',
+    font: v.font, paper: window.neo.paper || 'Letter', lang: writingLanguage(),
+    // one story with no chapters: the short-story layout
+    short: sections.length === 1 && chapters.length === 1 && !chapters[0].heading,
+    sections, words
+  };
+}
+// Courier Prime (NEO's own Courier, bundled) goes into the PDF; Times New
+// Roman is the computer's own
+async function manuscriptFontFaces(font) {
+  if (font !== 'courier') return '';
+  let css = '';
+  for (const sheet of document.styleSheets) {
+    let rules = [];
+    try { rules = [...sheet.cssRules]; } catch { continue; }
+    for (const r of rules) {
+      if (!(r instanceof CSSFontFaceRule) || r.style.getPropertyValue('font-family').replace(/["']/g, '').trim() !== 'Courier Prime') continue;
+      const src = r.style.getPropertyValue('src').match(/url\(["']?([^"')]+)["']?\)/);
+      if (!src) continue;
+      try {
+        const bytes = new Uint8Array(await (await fetch(new URL(src[1], sheet.href || location.href))).arrayBuffer());
+        let bin = '';
+        for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+        const range = r.style.getPropertyValue('unicode-range');
+        css += `@font-face { font-family: 'Courier Prime'; src: url(data:font/woff2;base64,${btoa(bin)}) format('woff2'); font-weight: ${r.style.getPropertyValue('font-weight') || 400}; font-style: ${r.style.getPropertyValue('font-style') || 'normal'};${range ? ' unicode-range: ' + range + ';' : ''} }\n`;
+      } catch { /* the fallbacks stand in */ }
+    }
+  }
+  return css;
+}
+
+// The dialog: the contact block, the byline and header, the font, END, and
+// the two ways out. Resolves to { values, as: 'docx' | 'pdf' } or null.
+function manuscriptDialog(v, words) {
+  return new Promise((resolve) => {
+    const bd = document.createElement('div');
+    bd.className = 'modal-backdrop';
+    bd.id = 'manuscript-dialog';
+    // (the values go in from code: a quotation mark in a title can't cut one short)
+    const field = (k, label, ph = '', type = 'text') => `<label>${escHtml(label)}<input data-k="${k}" type="${type}" placeholder="${escAttr(ph)}" spellcheck="false" autocomplete="off"></label>`;
+    bd.innerHTML = `
+      <div class="modal ms-modal" role="dialog" aria-modal="true" aria-labelledby="ms-title">
+        <h2 id="ms-title">${escHtml(t('Manuscript Format'))}</h2>
+        <p class="ms-lead">${escHtml(t('The way agents and editors ask for it: double-spaced 12 point, one-inch margins, a title page with your details, and your name, the title and the page number at the top of every page.'))}</p>
+        <div class="ms-cols">
+          <fieldset><legend>${escHtml(t('Your details, for the title page'))}</legend>
+            ${field('name', t('Name'), t('Your legal name'))}
+            <label>${escHtml(t('Address'))}<textarea data-k="address" rows="2" spellcheck="false" placeholder="${escAttr(t('Street, city, postcode'))}"></textarea></label>
+            ${field('phone', t('Phone'))}
+            ${field('email', t('Email'), '', 'email')}
+          </fieldset>
+          <fieldset><legend>${escHtml(t('This book'))}</legend>
+            ${field('byline', t('Byline'), t('The name on the book'))}
+            ${field('headerName', t('Name in the header'))}
+            ${field('headerTitle', t('Title in the header'))}
+            <p class="ms-header-eg"></p>
+            <div class="ms-font" role="radiogroup" aria-label="${escAttr(t('Font'))}">
+              <label class="ms-inline"><input type="radio" name="ms-font" value="times"${v.font !== 'courier' ? ' checked' : ''}> Times New Roman</label>
+              <label class="ms-inline"><input type="radio" name="ms-font" value="courier"${v.font === 'courier' ? ' checked' : ''}> Courier</label>
+            </div>
+            <label class="ms-inline"><input type="checkbox" data-k="end"${v.end ? ' checked' : ''}> ${escHtml(t('“END” after the last line'))}</label>
+          </fieldset>
+        </div>
+        <p class="ms-count">${escHtml(t('{shown} on the title page ({n} counted).', { shown: t('about {n} words', { n: NeoManuscript.roundWords(words).toLocaleString(NeoI18n.getLocale()) }), n: words.toLocaleString(NeoI18n.getLocale()) }))}</p>
+        <div class="ms-actions">
+          <button class="m-cancel btn-quiet">${escHtml(t('Cancel'))}</button>
+          <button class="btn-quiet ms-docx">${escHtml(t('Save as Word (.docx)'))}</button>
+          <button class="btn-gold ms-pdf">${escHtml(t('Save as PDF'))}</button>
+        </div>
+      </div>`;
+    bd.querySelectorAll('[data-k]').forEach((el) => { if (el.type === 'checkbox') el.checked = !!v[el.dataset.k]; else el.value = v[el.dataset.k] || ''; });
+    const read = () => {
+      const out = { ...v };
+      bd.querySelectorAll('[data-k]').forEach((el) => { out[el.dataset.k] = el.type === 'checkbox' ? el.checked : el.value.trim(); });
+      out.font = (bd.querySelector('input[name="ms-font"]:checked') || {}).value || 'times';
+      return out;
+    };
+    const eg = () => { bd.querySelector('.ms-header-eg').textContent = t('At the top right: {header}', { header: NeoManuscript.headerText(read()) + '1' }); };
+    // the header's name follows the byline until it's been changed by hand
+    let nameTouched = v.headerName !== NeoManuscript.surnameOf(v.byline);
+    bd.querySelector('[data-k="headerName"]').addEventListener('input', () => { nameTouched = true; });
+    bd.querySelector('[data-k="byline"]').addEventListener('input', (e) => {
+      if (!nameTouched) bd.querySelector('[data-k="headerName"]').value = NeoManuscript.surnameOf(e.target.value);
+    });
+    bd.addEventListener('input', eg);
+    eg();
+    const done = (val) => { bd.remove(); resolve(val); };
+    bd.querySelector('.m-cancel').onclick = () => done(null);
+    bd.querySelector('.ms-docx').onclick = () => done({ values: read(), as: 'docx' });
+    bd.querySelector('.ms-pdf').onclick = () => done({ values: read(), as: 'pdf' });
+    bd.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); done(null); } });
+    document.body.appendChild(bd);
+    const first = bd.querySelector(v.name ? '.ms-pdf' : '[data-k="name"]');
+    first.focus();
+  });
+}
+
+// What was typed is kept: the details for every book, the byline and the
+// header for this one (only where they differ from what NEO would choose)
+async function manuscriptKeep(v) {
+  library.manuscript = { name: v.name, address: v.address, phone: v.phone, email: v.email, font: v.font, end: !!v.end };
+  await writeLibrary(library);
+  const mine = {};
+  if (v.byline && v.byline !== manuscriptByline()) mine.byline = v.byline;
+  if (v.headerName && v.headerName !== NeoManuscript.surnameOf(v.byline)) mine.headerName = v.headerName;
+  if (v.headerTitle && v.headerTitle !== String(book.title || t('Untitled')).toLocaleUpperCase(writingLanguage())) mine.headerTitle = v.headerTitle;
+  const before = JSON.stringify(book.manuscript || {});
+  if (Object.keys(mine).length) book.manuscript = mine; else delete book.manuscript;
+  if (JSON.stringify(book.manuscript || {}) !== before) await saveMeta();
+}
+
+let manuscriptBusy = false;
+async function exportManuscript() {
+  if (!book) { toast(t('Open a book first')); return; }
+  if (isScript()) { toast(t('A script has its own format: Export → PDF.')); return; }
+  if (!window.NeoManuscript || manuscriptBusy) return;
+  // never over another dialog (the menu stays open under one), never twice
+  if (document.querySelector('.modal-backdrop:not([hidden])')) return;
+  flushAllSaves();
+  const sections = manuscriptSections();
+  if (!sections.some((s) => s.kind === 'chapter' && s.words)) { toast(t('There’s no story to send yet.')); return; }
+  manuscriptBusy = true;
+  try {
+    await manuscriptRun(sections);
+  } finally {
+    manuscriptBusy = false;
+  }
+}
+async function manuscriptRun(sections) {
+  const chosen = await manuscriptDialog(manuscriptDefaults(), sections.reduce((n, s) => n + s.words, 0));
+  if (!chosen || !book) return;
+  // (remembering is a nicety: a library that can't be written now doesn't stop the export)
+  try { await manuscriptKeep(chosen.values); } catch (err) { window.neo.logError('manuscript details: ' + (err && err.stack || err)); }
+  const m = manuscriptModel(chosen.values, sections);
+  const defaultName = safeName(book.title) + '-' + safeName(t('manuscript'));
+  try {
+    let saved;
+    if (chosen.as === 'docx') {
+      saved = await window.neo.exportSave({ format: 'docx', defaultName, zipEntries: NeoManuscript.docxEntries(m) });
+    } else {
+      toast(t('Setting the pages…'));
+      const res = await window.neo.printManuscript({ html: NeoManuscript.html(m, { fontFaces: await manuscriptFontFaces(m.font) }), paper: m.paper, defaultName });
+      saved = res && res.file;
+      if (saved) toast(t('Exported: {file} ({pages} pages)', { file: saved.split(/[\\/]/).pop(), pages: res.pages }), 6000);
+      return;
+    }
+    if (saved) toast(t('Exported: {file}', { file: saved.split(/[\\/]/).pop() }));
+  } catch (err) {
+    window.neo.logError('export manuscript: ' + (err && err.stack || err));
+    toast(t('Couldn’t export: {error}', { error: plainError(err) }), 8000);
+  }
+}
+
+
+/* ================================================================== */
+/*  PRINT BOOK — a paperback for KDP                                   */
+/*  File → Export → Paperback for KDP… lays the open book out as a     */
+/*  print-ready interior PDF at one of KDP's four common trim sizes,   */
+/*  and a cover template sized to its page count. This builds the      */
+/*  book's HTML; main.js (print:paperback) lays it out in pages with   */
+/*  Paged.js, hyphenates it, sets the inside margin KDP asks for at    */
+/*  that page count, and prints both files.                            */
+/* ================================================================== */
+
+const PRINT_TRIMS = [
+  { id: '5x8', label: '5 × 8 in', mm: '127 × 203 mm', size: 10.5, outside: 0.6, perPage: 250 },
+  { id: '5.25x8', label: '5.25 × 8 in', mm: '133 × 203 mm', size: 10.75, outside: 0.6, perPage: 265 },
+  { id: '5.5x8.5', label: '5.5 × 8.5 in', mm: '140 × 216 mm', size: 11, outside: 0.65, perPage: 290 },
+  { id: '6x9', label: '6 × 9 in', mm: '152 × 229 mm', size: 11.5, outside: 0.75, perPage: 330 }
+];
+const PRINT_DIMS = { '5x8': [5, 8], '5.25x8': [5.25, 8], '5.5x8.5': [5.5, 8.5], '6x9': [6, 9] };
+// a CSS string, for the running heads
+// (a "<" as an escape too, so a name can't close the style block it sits in)
+const cssString = (s) => '"' + String(s || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/</g, '\\3c ').replace(/[\n\r]+/g, ' ') + '"';
+
+// The book's pages for print: the title page, the copyright page on its
+// back, the dedication and epigraph, the contents where the writer put
+// one, the story (each chapter on a right-hand page), the pages at the back,
+// then the other books by the same name and a note to the reader.
+function buildPrintHtml(d, o) {
+  const trim = PRINT_TRIMS.find((x) => x.id === o.trim) || PRINT_TRIMS[0];
+  const [W, H] = PRINT_DIMS[trim.id];
+  const esc = (s) => escHtml(String(s || ''));
+  const cap = (library.fonts || {}).dropcap === 'none' ? '' : exportDropCapFont();
+  const year = String(new Date().getFullYear());
+  // paragraphs of prose, hyphenated in main.js (class "hy")
+  // a footnote sits at the foot of its page (Paged.js's float: footnote).
+  // NEO writes both numbers itself, through the whole book: Paged.js's own
+  // counter gave every note on a page that page's last number.
+  const fnStart = new Map();
+  let fnRun = 0;
+  for (const sec of d.sections) {
+    for (const p of sec.paras) { fnStart.set(p, fnRun); fnRun += ((p.html || '').match(FN_HTML) || []).length; }
+  }
+  const atFoot = (html, p) => {
+    let n = fnStart.has(p) ? fnStart.get(p) : 0;
+    return html.replace(FN_HTML, (m, note) => { n += 1; return `<sup class="fncall">${n}</sup><span class="footnote"><span class="fnm">${n}</span>&#8194;${note}</span>`; });
+  };
+  const prose = (paras, opening) => {
+    let first = opening;
+    let afterBreak = false;
+    return paras.map((p) => {
+      if (p.sceneBreak) { afterBreak = true; return '<p class="brk">*&#8195;*&#8195;*</p>'; }
+      const inner = atFoot(p.html.replace(/^<p[^>]*>|<\/p>$/g, ''), p);
+      if (p.poetry) { afterBreak = false; return `<p class="poetry"${p.align ? ` style="text-align:${p.align}"` : ''}>${inner}</p>`; }
+      const cls = ['hy'];
+      if (first) cls.push('first');
+      if (first && OPENING_DASH.test(p.text)) cls.push('dialogue');
+      if (afterBreak || p.flush) cls.push('flush');
+      first = false;
+      afterBreak = false;
+      return `<p class="${cls.join(' ')}"${p.align ? ` style="text-align:${p.align}"` : ''}>${inner}</p>`;
+    }).join('\n');
+  };
+  const lines = (paras) => paras.map((p) => {
+    if (p.sceneBreak) return '<p class="brk">*&#8195;*&#8195;*</p>';
+    const cls = [isAttribution(p) ? 'attr' : '', p.poetry ? 'poetry' : ''].filter(Boolean).join(' ');
+    return `<p${cls ? ` class="${cls}"` : ''}>${atFoot(p.html.replace(/^<p[^>]*>|<\/p>$/g, ''), p)}</p>`;
+  }).join('\n');
+
+  let body = '';
+  // the title page (page 1, a right-hand page)
+  body += `<section class="fm titlepage"><h1>${esc(d.title)}</h1>${d.subtitle ? `<p class="sub">${esc(d.subtitle)}</p>` : ''}<p class="auth">${esc(d.author)}</p></section>`;
+  // its back: the copyright page, the writer's own or the standard one
+  const own = d.sections.find((s) => s.kind === 'copyright');
+  let copy = own ? lines(own.paras) : [
+    t('Copyright © {year} {name}', { year, name: d.author }),
+    t('All rights reserved.'),
+    t('No part of this book may be reproduced in any form or by any electronic or mechanical means, including information storage and retrieval systems, without written permission from the author, except for the use of brief quotations in a book review.'),
+    ...(o.fiction ? [t('This is a work of fiction. Names, characters, places, and incidents either are the products of the author’s imagination or are used fictitiously. Any resemblance to actual persons, living or dead, events, or locales is entirely coincidental.')] : [])
+  ].map((x) => `<p>${esc(x)}</p>`).join('\n');
+  if (o.isbn && !/ISBN/i.test(copy)) copy += `\n<p>ISBN ${esc(o.isbn)}</p>`;
+  body += `<section class="fm copyright"><div class="cp">${copy}</div></section>`;
+  // the dedication and the epigraph, each on a right-hand page
+  for (const s of d.sections.filter((x) => x.kind === 'dedication' || x.kind === 'epigraph')) {
+    body += `<section class="fm ${s.kind}">${lines(s.paras)}</section>`;
+  }
+  // the contents, where the writer put a Contents page
+  if (d.contents && d.toc && d.toc.length) {
+    // (a part page before the story's first page has no number to show)
+    const firstStory = d.sections.find((x) => x.kind === 'chapter');
+    const unnumbered = new Set();
+    for (const x of d.sections) { if (x === firstStory) break; unnumbered.add(x.num); }
+    body += `<nav class="fm toc"><h2 class="toc-hd">${esc(t('Contents'))}</h2><ol>${d.toc.map((e) => `
+      <li class="lv${e.level} t-${e.type}${unnumbered.has(e.num) ? ' nonum' : ''}"><a href="#s${e.num}"><span class="toc-t">${esc(e.label)}</span></a></li>`).join('')}</ol></nav>`;
+  }
+  // the story, then the pages at the back: the note to the reader first
+  // (right after the last page, where a reader decides to say something),
+  // then the writer's own pages, then the other books. The back starts on a
+  // right-hand page; its pages after that run on, with no blank between.
+  const backPages = [];
+  // page 1 is the story's first page (a prologue or chapter 1): the pages
+  // before it aren't counted, every page after it is, blank or not
+  let numbered = false;
+  for (const s of d.sections) {
+    const id = 's' + s.num;
+    if (['copyright', 'dedication', 'epigraph'].includes(s.kind)) continue;
+    if (s.kind === 'part') {
+      body += `<section class="fm part" id="${id}"><h2><span class="pl">${esc(s.heading)}</span>${s.partTitle ? `<span class="pt">${esc(s.partTitle)}</span>` : ''}</h2>${lines(s.paras)}</section>`;
+      continue;
+    }
+    const back = s.kind === 'acknowledgments' || s.kind === 'about';
+    if (back) { backPages.push(s); continue; }
+    // a chapter's name and its title on lines of their own
+    let label = '';
+    let title = s.heading || '';
+    if (s.chId && chapterKind(s.chId) !== 'unnumbered') {
+      const own = ((book.chapterTitles || {})[s.chId] || '').trim();
+      if (!(library.exportCustomChapterTitles && own)) { label = chapterName(s.chId); title = own; }
+    }
+    // a title that only repeats the label ("Chapter 1" under "Chapter One") isn't printed twice
+    const word = label.split(/\s+/)[0];
+    if (title && word && (title.toLowerCase() === label.toLowerCase() ||
+        new RegExp('^' + word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s+([0-9]+|[ivxlcdm]+)\\.?$', 'i').test(title))) title = '';
+    // "Chapter 7" over "Holston"; a chapter with no title, or a page at
+    // the back, is its one line
+    let head = '';
+    if (label && title) head = `<p class="ch-num">${esc(label)}</p><h2 class="ch-title">${esc(title)}</h2>`;
+    else if (label || title) head = `<h2 class="ch-title ch-only">${esc(label || title)}</h2>`;
+    if (head) head = `<header class="ch-head">${head}</header>`;
+    const pg1 = !back && !numbered;
+    if (pg1) numbered = true;
+    body += `<section class="${back ? 'backpage' : 'chapter'}${pg1 ? ' pg1' : ''}" id="${id}">${head}${prose(s.paras, !back && !!head)}</section>`;
+  }
+  const back = [];
+  // a note to the reader: a review, and where to find the writer
+  const links = o.links || {};
+  const reach = [
+    links.website && [t('Website'), links.website],
+    links.newsletter && [t('Newsletter'), links.newsletter],
+    links.email && [t('Email'), links.email],
+    ...String(links.social || '').split('\n').map((x) => x.trim()).filter(Boolean).map((x) => ['', x])
+  ].filter(Boolean);
+  if (o.review || reach.length) {
+    back.push(`<section class="backpage note"><header class="ch-head"><h2 class="ch-title ch-only">${esc(t('Thank You for Reading'))}</h2></header>
+      ${o.review ? String(o.reviewWords || t('If you enjoyed {title}, please consider leaving a review on Amazon or Goodreads. Even a line or two helps other readers find the book, and it means a great deal to me.', { title: d.title })).split(/\n+/).map((x) => `<p class="hy flush">${esc(x)}</p>`).join('') : ''}
+      ${reach.length ? `<p class="reach-hd">${esc(t('Stay in touch'))}</p>${reach.map(([k, v]) => `<p class="reach">${k ? `<span class="k">${esc(k)}</span> ` : ''}${esc(v)}</p>`).join('')}` : ''}
+    </section>`);
+  }
+  // the writer's acknowledgments and about-the-author pages
+  for (const s of backPages) {
+    back.push(`<section class="backpage" id="s${s.num}"><header class="ch-head"><h2 class="ch-title ch-only">${esc(s.heading)}</h2></header>${prose(s.paras, false)}</section>`);
+  }
+  // other books by this name
+  if (o.alsoBy && o.alsoBy.length) {
+    back.push(`<section class="backpage also"><header class="ch-head"><h2 class="ch-title ch-only">${esc(t('Also by {author}', { author: d.author }))}</h2></header>${o.alsoBy.map((x) => `<p>${esc(x)}</p>`).join('')}</section>`);
+  }
+  body += back.map((x, i) => (i ? x.replace('class="backpage', 'class="backpage run-on') : x)).join('\n');
+
+  const sz = trim.size;
+  return `<!DOCTYPE html>
+<html lang="${esc(d.language || writingLanguage())}"><head><meta charset="utf-8"><title>${esc(d.title)}</title>
+<style>
+${o.fonts || ''}
+@page { size: ${W}in ${H}in; margin: 0.7in ${trim.outside}in 0.75in ${trim.outside}in; }
+@page :left {
+  margin-left: ${trim.outside}in; margin-right: __NEO_GUTTER__;
+  @top-center { content: ${cssString(d.author)}; }
+  @bottom-left { content: counter(page); }
+}
+@page :right {
+  margin-left: __NEO_GUTTER__; margin-right: ${trim.outside}in;
+  @top-center { content: ${cssString(d.title)}; }
+  @bottom-right { content: counter(page); }
+}
+/* a printed book's page numbers sit at the outside corners (left pages at
+   the left, right pages at the right), where a thumb flipping through finds them (#392) */
+@page { @top-center { font-family: ${exportBodyFont()}; font-size: ${(sz * 0.7).toFixed(2)}pt; letter-spacing: 0.16em; text-transform: uppercase; color: #333; vertical-align: bottom; padding-bottom: 0.18in; }
+        @bottom-left { font-family: ${exportBodyFont()}; font-size: ${(sz * 0.82).toFixed(2)}pt; color: #333; vertical-align: top; padding-top: 0.2in; text-align: left; }
+        @bottom-right { font-family: ${exportBodyFont()}; font-size: ${(sz * 0.82).toFixed(2)}pt; color: #333; vertical-align: top; padding-top: 0.2in; text-align: right; } }
+@page :blank { @top-center { content: none; } @bottom-left { content: none; } @bottom-right { content: none; } }
+@page front { @top-center { content: none; } @bottom-left { content: none; } @bottom-right { content: none; } }
+@page chapter:first { @top-center { content: none; } }
+@page back { @top-center { content: none; } }
+html, body { margin: 0; padding: 0; }
+body { font-family: ${exportBodyFont()}; font-size: ${sz}pt; line-height: 1.42; color: #000; font-kerning: normal; font-variant-ligatures: common-ligatures; }
+p { margin: 0; orphans: 2; widows: 2; }
+.fm { page: front; break-before: right; text-align: center; }
+.titlepage { padding-top: 1.6in; }
+.titlepage h1 { font-size: ${(sz * 2.3).toFixed(1)}pt; line-height: 1.15; font-weight: normal; margin: 0; }
+.titlepage .sub { font-style: italic; font-size: ${(sz * 1.15).toFixed(1)}pt; margin-top: 0.18in; }
+.titlepage .auth { margin-top: 1.3in; font-size: ${(sz * 0.95).toFixed(1)}pt; letter-spacing: 0.2em; text-transform: uppercase; }
+.copyright { break-before: left; text-align: left; height: ${(H - 0.7 - 0.75 - 0.05).toFixed(2)}in; position: relative; }
+.copyright .cp { position: absolute; left: 0; right: 0; bottom: 0; font-size: ${(sz * 0.78).toFixed(2)}pt; line-height: 1.5; }
+.copyright .cp p { margin: 0 0 0.75em; }
+.dedication, .epigraph { padding-top: 1.7in; font-style: italic; }
+.dedication p, .epigraph p { margin: 0 0 0.6em; }
+.epigraph p.attr { font-style: normal; font-size: 0.9em; letter-spacing: 0.04em; margin-top: 0.8em; }
+.toc { text-align: left; padding-top: 0.6in; }
+.toc-hd { text-align: center; font-weight: normal; font-size: ${(sz * 1.05).toFixed(1)}pt; letter-spacing: 0.22em; text-transform: uppercase; margin: 0 0 0.45in; }
+.toc ol { list-style: none; margin: 0; padding: 0; }
+.toc li { margin: 0 0 0.35em; }
+.toc li.lv1 { padding-left: 1.2em; }
+.toc li.t-part { margin-top: 0.9em; letter-spacing: 0.1em; text-transform: uppercase; font-size: 0.92em; }
+.toc a { color: inherit; text-decoration: none; display: flex; }
+.toc .toc-t { flex: 1; }
+.toc a::after { content: target-counter(attr(href url), page); padding-left: 1em; font-variant-numeric: lining-nums tabular-nums; }
+.toc li.nonum a::after { content: none; }
+.pg1 { counter-reset: page 1; }
+.part { padding-top: 2.1in; }
+.part h2 { font-weight: normal; margin: 0 0 0.5in; }
+.part .pl { display: block; font-size: ${(sz * 1.05).toFixed(1)}pt; letter-spacing: 0.24em; text-transform: uppercase; }
+.part .pt { display: block; font-size: ${(sz * 1.9).toFixed(1)}pt; line-height: 1.2; margin-top: 0.2in; }
+.part p { font-style: italic; margin: 0 0.3in 0.6em; }
+.chapter { page: chapter; break-before: right; }
+.backpage { page: back; break-before: right; }
+.backpage.run-on { break-before: page; }
+.ch-head { padding-top: 1.35in; margin-bottom: 0.42in; text-align: center; break-after: avoid; }
+.ch-num { font-size: ${(sz * 0.95).toFixed(1)}pt; letter-spacing: 0.24em; text-transform: uppercase; margin: 0 0 0.16in; }
+.ch-title { font-weight: normal; font-size: ${(sz * 1.6).toFixed(1)}pt; line-height: 1.2; margin: 0; }
+.ch-title.ch-only { font-size: ${(sz * 1.35).toFixed(1)}pt; letter-spacing: 0.06em; }
+p.hy { text-align: justify; text-indent: 1.5em; hyphens: manual; -webkit-hyphens: manual; text-wrap: pretty; }
+p.hy.first, p.hy.flush { text-indent: 0; }
+${cap ? `p.first:not(.dialogue)::first-letter { initial-letter: 2; -webkit-initial-letter: 2; font-family: ${cap}; padding-right: 0.06em; }` : ''}
+p.brk { text-align: center; margin: 0.7em 0; break-after: avoid; letter-spacing: 0.1em; }
+p.poetry { margin: 0.5em 1.5em; text-align: left; }
+p.poetry + p.poetry { margin-top: 0; }
+.backpage p.hy { text-indent: 0; margin-bottom: 0.7em; }
+.also p { text-align: center; font-style: italic; margin: 0 0 0.45em; }
+.note .reach-hd { margin-top: 1.4em; text-align: center; letter-spacing: 0.18em; text-transform: uppercase; font-size: 0.85em; }
+.note .reach { text-align: center; margin-top: 0.35em; }
+.note .reach .k { font-variant-caps: all-small-caps; letter-spacing: 0.08em; }
+.neo-pad { page: front; break-before: page; height: 1px; }
+.footnote { float: footnote; font-size: ${(sz * 0.8).toFixed(2)}pt; line-height: 1.35; text-align: left; text-indent: 0; hyphens: manual; font-style: normal; font-weight: normal; }
+.footnote::footnote-marker { content: none; }
+::footnote-call { content: none; }
+[data-footnote-marker] { list-style: none; }
+.fncall { font-size: 0.7em; vertical-align: super; line-height: 0; }
+@page { @footnote { border-top: 0.4pt solid #555; padding-top: 0.4em; margin-top: 0.8em; } }
+</style></head><body>
+${body}
+</body></html>`;
+}
+
+// File → Export → Paperback for KDP…: the size, the paper, and what goes
+// at the back. The choices are kept: the book's with the book, the
+// contact details with the name it's written under.
+async function printPaperback() {
+  if (!book) return;
+  if (isScript()) { toast(t('A script exports as a PDF, Fountain or Final Draft; paperbacks are for books')); return; }
+  // one at a time: the pages are set in a single window
+  if (printPaperback.busy) { toast(t('Still setting the pages of the last paperback…')); return; }
+  flushAllSaves();
+  const author = currentAuthor();
+  const bp = book.print || {};
+  const ap = author.print || {};
+  const hasDedication = book.chapterOrder.some((c) => chapterKind(c) === 'dedication');
+  // the other books written under this name, newest first
+  const others = [];
+  for (const s of shelvesFor(author.id)) {
+    for (const id of s.bookIds) {
+      if (id === book.id) continue;
+      const m = await shelfMeta(id);
+      if (!m || isPageMeta(m) || isScript(m) || isUntitled(m.title)) continue;
+      others.push({ id, title: m.title });
+    }
+  }
+  // the Also by list is the writer's own, one title per line: it starts as
+  // this name's other books in NEO, and can hold books written before NEO
+  const alsoText = typeof ap.alsoByText === 'string' ? ap.alsoByText
+    : Array.isArray(ap.alsoBy) ? others.filter((x) => ap.alsoBy.includes(x.id)).map((x) => x.title).join('\n')
+      : others.map((x) => x.title).join('\n');
+  const reviewDefault = t('If you enjoyed {title}, please consider leaving a review on Amazon or Goodreads. Even a line or two helps other readers find the book, and it means a great deal to me.', { title: book.title });
+  const reviewText = ap.reviewText ? ap.reviewText.split('{title}').join(book.title) : reviewDefault;
+  const field = (id, label, value, ph = '') => `<label>${label}<input id="${id}" type="text" spellcheck="false" value="${escHtml(value || '').replace(/"/g, '&quot;')}" placeholder="${escHtml(ph).replace(/"/g, '&quot;')}"/></label>`;
+  const bd = document.createElement('div');
+  bd.className = 'modal-backdrop';
+  bd.innerHTML = `
+    <div class="modal print-modal" style="width:560px">
+      <h2 style="font-size:17px">${t('Paperback for KDP')}</h2>
+      <p class="pm-hint">${t('A print-ready interior PDF and a cover template sized to its page count, for Amazon KDP.')}</p>
+      <div class="pm-row pm-trims">${PRINT_TRIMS.map((x) => `
+        <button type="button" class="fr-choice${(bp.trim || '5.5x8.5') === x.id ? ' sel' : ''}" data-trim="${x.id}"><strong>${x.label}</strong><span>${x.mm}</span></button>`).join('')}
+      </div>
+      <div class="pm-row">
+        <label>${t('Paper')}
+          <select id="pm-paper">
+            ${[['cream', t('Cream')], ['white', t('White')], ['groundwood', t('Groundwood')]].map(([v, l]) => `<option value="${v}"${(bp.paper || 'cream') === v ? ' selected' : ''}>${l}</option>`).join('')}
+          </select>
+        </label>
+        ${field('pm-isbn', t('ISBN (optional)'), bp.isbn, '979-8-…')}
+      </div>
+      <label class="pm-check"><input id="pm-fiction" type="checkbox"${bp.fiction !== false ? ' checked' : ''}/> ${t('The standard fiction notice on the copyright page')}</label>
+      ${hasDedication ? '' : field('pm-dedication', t('Dedication (optional)'), '', t('For…'))}
+      <h3>${t('At the back of the book, for {name}', { name: escHtml(author.name || displayAuthor()) })}</h3>
+      <div class="pm-review-row"><label class="pm-check"><input id="pm-review" type="checkbox"${ap.review !== false ? ' checked' : ''}/> ${t('Ask readers for a review')}</label><button type="button" class="pm-edit btn-quiet">${t('Edit wording')}</button></div>
+      <textarea id="pm-review-text" rows="3" hidden>${escHtml(reviewText)}</textarea>
+      <div class="pm-row">
+        ${field('pm-web', t('Website'), ap.website, 'example.com')}
+        ${field('pm-news', t('Newsletter'), ap.newsletter, 'example.com/newsletter')}
+      </div>
+      <div class="pm-row">
+        ${field('pm-email', t('Email'), ap.email)}
+        <label>${t('Social media, one per line')}<textarea id="pm-social" rows="2" spellcheck="false">${escHtml(ap.social || '')}</textarea></label>
+      </div>
+      <label class="pm-also">${t('Also by {name}, one title per line', { name: escHtml(author.name || displayAuthor()) })}<textarea id="pm-also" rows="4" spellcheck="false">${escHtml(alsoText)}</textarea></label>
+      <div style="text-align:right;margin-top:14px">
+        <button class="m-cancel btn-quiet" style="margin-right:10px">${t('Cancel')}</button>
+        <button class="m-ok btn-gold">${t('Make PDFs')}</button>
+      </div>
+    </div>`;
+  document.body.appendChild(bd);
+  bd.querySelector('.pm-edit').onclick = (e) => {
+    const ta = bd.querySelector('#pm-review-text');
+    ta.hidden = false;
+    e.currentTarget.hidden = true;
+    ta.focus();
+  };
+  let trim = bp.trim || '5.5x8.5';
+  const selTrim = bd.querySelector('.fr-choice.sel');
+  if (selTrim) selTrim.focus({ preventScroll: true });
+  for (const b of bd.querySelectorAll('[data-trim]')) {
+    b.onclick = () => { trim = b.dataset.trim; b.focus({ preventScroll: true }); bd.querySelectorAll('[data-trim]').forEach((x) => x.classList.toggle('sel', x === b)); };
+  }
+  const go = await new Promise((resolve) => {
+    bd.querySelector('.m-ok').onclick = () => resolve(true);
+    bd.querySelector('.m-cancel').onclick = () => resolve(false);
+    bd.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); resolve(false); } });
+  });
+  const val = (id) => { const el = bd.querySelector('#' + id); return el ? el.value.trim() : ''; };
+  const opts = {
+    trim,
+    paper: val('pm-paper') || 'cream',
+    isbn: val('pm-isbn'),
+    fiction: bd.querySelector('#pm-fiction').checked,
+    review: bd.querySelector('#pm-review').checked,
+    links: { website: val('pm-web'), newsletter: val('pm-news'), email: val('pm-email'), social: bd.querySelector('#pm-social').value.trim() },
+    alsoByText: bd.querySelector('#pm-also').value.replace(/\r/g, '').split('\n').map((x) => x.trim()).filter(Boolean).join('\n'),
+    reviewText: bd.querySelector('#pm-review-text').value.trim(),
+    dedication: val('pm-dedication')
+  };
+  bd.remove();
+  if (!go) return;
+  // kept for next time
+  book.print = { trim: opts.trim, paper: opts.paper, isbn: opts.isbn, fiction: opts.fiction };
+  // The wording is kept with the title as a blank, so it fits the next
+  // book. Left as it came, it stays what it was (NEO's own wording follows
+  // its translations); edited, the book's title where it stands as a whole
+  // becomes the blank again.
+  let ownWording = ap.reviewText || '';
+  if (opts.reviewText && opts.reviewText !== reviewText) {
+    const tt = book.title.trim();
+    const esc = tt.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    ownWording = opts.reviewText === reviewDefault ? ''
+      : tt.length > 1 ? opts.reviewText.replace(new RegExp('(^|[^\\p{L}\\p{N}])' + esc + '(?![\\p{L}\\p{N}])', 'gu'), '$1{title}') : opts.reviewText;
+  }
+  author.print = { review: opts.review, ...opts.links, alsoByText: opts.alsoByText, reviewText: ownWording };
+  await saveMeta();
+  await writeLibrary(library);
+  // a dedication typed here becomes the book's own Dedication page
+  if (opts.dedication && !hasDedication) {
+    const at = book.chapterOrder.findIndex((c) => !['copyright'].includes(chapterKind(c)));
+    const chId = newEntryId();
+    book.chapterOrder.splice(at < 0 ? 0 : at, 0, chId);
+    setChapterKind(chId, 'dedication');
+    chapterHTML[chId] = `<p>${escHtml(opts.dedication)}</p>`;
+    await persistChapter(chId);
+    await saveMeta();
+    renderChapters();
+  }
+  const d = bookExportData();
+  opts.alsoBy = opts.alsoByText ? opts.alsoByText.split('\n') : [];
+  opts.reviewWords = opts.reviewText || reviewDefault;
+  const words = d.sections.reduce((n, s) => n + s.paras.reduce((m, p) => m + countWords(p.text || ''), 0), 0);
+  const per = (PRINT_TRIMS.find((x) => x.id === opts.trim) || PRINT_TRIMS[0]).perPage;
+  toast(t('Setting the pages…'), 600000);
+  printPaperback.busy = true;
+  try {
+    const html = buildPrintHtml(d, { ...opts, fonts: await exportFontFaces(d) });
+    const r = await window.neo.printPaperback({
+      html, trim: opts.trim, paper: opts.paper, language: d.language,
+      pagesGuess: Math.round(words / per) + d.sections.length * 1.5 + 8,
+      title: d.title, author: d.author,
+      defaultName: safeName(d.title) + ' - ' + t('paperback') + ' ' + opts.trim
+    });
+    if (!r) { toast(t('Not saved')); return; }
+    let msg = t('Saved the interior ({pages} pages) and its cover template (spine {spine} in)', { pages: r.pages, spine: r.spine });
+    if (r.tooFew) msg += ' · ' + t('KDP needs at least 24 pages');
+    if (r.tooMany) msg += ' · ' + t('more pages than KDP prints on this paper');
+    toast(msg, 9000);
+  } catch (err) {
+    window.neo.logError('paperback: ' + (err && err.stack || err));
+    toast(t('Couldn’t export: {error}', { error: plainError(err) }), 8000);
+  } finally {
+    printPaperback.busy = false;
+  }
+}
+
 // One chapter, on its own: the book's title page, then that chapter, headed
 // as it is in the book (Chapter 7 — Holston). No cover image in a web page
 // or PDF; an EPUB keeps the book's cover, since e-readers expect one.
@@ -12507,9 +16232,16 @@ function buildTxt(data) {
   let out = `${d.title.toUpperCase()}\n`;
   if (d.subtitle) out += `${d.subtitle}\n`;
   out += t('by {author}', { author: d.author }) + '\n\n\n';
+  let fnN = 0;
   for (const ch of d.sections) {
     if (ch.heading) out += `${plainHeading(ch).toUpperCase()}\n\n`;
-    for (const p of ch.paras) out += p.sceneBreak ? '\n***\n\n' : (p.poetry ? '    ' : '') + p.text + '\n\n';
+    const notes = [];
+    for (const p of ch.paras) {
+      const noted = (p.runs || []).some((r) => r.fn !== undefined);
+      const text = noted ? p.runs.map((r) => (r.fn !== undefined ? (notes.push(r.fn), `[${++fnN}]`) : r.text)).join('').trim() : p.text;
+      out += p.sceneBreak ? '\n***\n\n' : (p.poetry ? '    ' : '') + text + '\n\n';
+    }
+    if (notes.length) out += '----------\n' + notes.map((n, i) => `[${fnN - notes.length + i + 1}] ${n}`).join('\n') + '\n\n';
     out += '\n';
   }
   return out;
@@ -12527,11 +16259,16 @@ function buildMd(data) {
   let out = `# ${mdMeta(d.title)}\n\n`;
   if (d.subtitle) out += `*${mdMeta(d.subtitle)}*\n\n`;
   out += `**${t('by {author}', { author: mdMeta(d.author) })}**\n\n`;
+  let fnN = 0;
   for (const ch of d.sections) {
     if (ch.heading) out += `\n## ${mdMeta(plainHeading(ch))}\n\n`;
+    const notes = [];
     for (const p of ch.paras) {
-      out += p.sceneBreak ? '\n***\n\n' : (p.poetry ? '> ' : '') + mdRuns(p.runs) + '\n\n';
+      const runs = (p.runs || []).map((r) => (r.fn !== undefined ? (notes.push(r.fn), { text: '\uE001' + (++fnN) + '\uE002' }) : r));
+      out += p.sceneBreak ? '\n***\n\n' : (p.poetry ? '> ' : '') + mdRuns(runs).replace(/\uE001(\d+)\uE002/g, '[^$1]') + '\n\n';
     }
+    notes.forEach((n, i) => { out += `[^${fnN - notes.length + i + 1}]: ${mdMeta(n)}\n`; });
+    if (notes.length) out += '\n';
   }
   return out;
 }
@@ -12625,26 +16362,43 @@ function buildHtml(data, opts = {}) {
     const cls = [attrs && isAttribution(p) ? 'attr' : '', p.poetry ? 'poetry' : ''].filter(Boolean).join(' ');
     return `<p${cls ? ` class="${cls}"` : ''}${p.align ? ` style="text-align:${p.align}"` : ''}>${p.html.replace(/^<p[^>]*>|<\/p>$/g, '')}</p>`;
   }).join('\n');
-  const sectionHtml = (ch) => {
+  // In the PDF, page 1 is the story's first page (a prologue or chapter 1):
+  // the pages before it aren't counted; after it every page is, though a
+  // page like a part's title still shows no number
+  const firstStory = d.sections.find((x) => (x.kind || 'chapter') === 'chapter');
+  let counting = false;
+  let fnN = 0;
+  const sectionHtml = (sec) => {
+    const { paras, notes } = fnParas(sec.paras, fnN, (note, n) => `<sup class="fnref"><a href="#fn${n}" id="fnr${n}">${n}</a></sup>`);
+    const html = sectionBody(notes.length ? { ...sec, paras } : sec);
+    if (!notes.length) return html;
+    const list = `<aside class="notes">${notes.map((note, i) => `<p id="fn${fnN + i + 1}"><a href="#fnr${fnN + i + 1}">${fnN + i + 1}</a>&#8194;${note}</p>`).join('')}</aside>`;
+    fnN += notes.length;
+    const at = html.lastIndexOf('</section>');
+    return at < 0 ? html + list : html.slice(0, at) + list + html.slice(at);
+  };
+  const sectionBody = (ch) => {
     const id = 's' + ch.num;
     const h = headTag(ch);
     const kind = ch.kind || 'chapter';
+    if (firstStory && ch.num === firstStory.num) counting = true;
+    const counted = counting ? ' counted' : '';
     if (kind === 'copyright' || kind === 'dedication' || kind === 'epigraph') {
       return `
-    <section class="page ${kind}" id="${id}"><div class="pg-in">${lines(ch.paras, kind !== 'copyright')}</div></section>`;
+    <section class="page ${kind}${counted}" id="${id}"><div class="pg-in">${lines(ch.paras, kind !== 'copyright')}</div></section>`;
     }
     if (kind === 'part') {
       // the separator is there for the PDF's bookmarks ("Part I: Title"),
       // not for the eye
       return `
-    <section class="page part" id="${id}">
+    <section class="page part${counted}" id="${id}">
       <${h} class="hd"><span class="pl">${escHtml(ch.heading)}</span>${ch.partTitle ? `<span class="sep">: </span><span class="pt">${escHtml(ch.partTitle)}</span>` : ''}</${h}>
       ${lines(ch.paras)}
     </section>`;
     }
     if (kind === 'opener') {
       return `
-    <section class="page opener" id="${id}">
+    <section class="page opener${counted}" id="${id}">
       <${h} class="hd">${escHtml(ch.heading)}</${h}>
       ${ch.subtitle ? `<p class="sub">${escHtml(ch.subtitle)}</p>` : ''}
       ${ch.byline ? `<p class="byline">${escHtml(ch.byline)}</p>` : ''}
@@ -12666,7 +16420,7 @@ function buildHtml(data, opts = {}) {
       <h2 class="hd">${escHtml(t('Contents'))}</h2>
       <ol>${d.toc.filter((e) => d.contentsChapters || e.type !== 'chapter').map((e) => `
         <li class="lv${e.level} t-${e.type}"><a href="#s${e.num}"><span class="toc-t">${escHtml(e.label)}</span><span class="toc-pg" data-for="s${e.num}"></span></a></li>`).join('')}
-      </ol>
+      </ol>${firstStory ? `<a class="p1-ref" href="#s${firstStory.num}" data-p1="s${firstStory.num}" aria-hidden="true" tabindex="-1">.</a>` : ''}
     </nav>` : '';
   // the contents follow the pages at the front of the book
   let body = '';
@@ -12742,12 +16496,22 @@ function buildHtml(data, opts = {}) {
   .contents li.t-part { margin-top: 1.1em; font-size: 15pt; line-height: 1.5; letter-spacing: 2px; font-variant-caps: all-small-caps; }
   .contents li:not(.t-page) + li.t-page { margin-top: 1.2em; }
   .prov { margin-top: 80px; text-align: center; color: #999; font-size: 9pt; }
+  /* footnotes: the number links down to the note, which closes its chapter */
+  .fnref { font-size: 0.68em; line-height: 0; vertical-align: super; }
+  .fnref a, .notes a { color: inherit; text-decoration: none; }
+  .notes { margin-top: 2.6em; padding-top: 0.6em; font-size: 10.5pt; line-height: 1.5; text-align: left; position: relative; break-inside: auto; }
+  .notes::before { content: ''; position: absolute; top: 0; left: 0; width: 30%; border-top: 1px solid #aaa; }
+  .chapter .notes p, .page .notes p { text-indent: 0; text-align: left; margin: 0 0 0.45em; font-style: normal; hyphens: manual; }
   /* printed pages carry their number at the foot; the cover, the title
      page and the pages that aren't chapters don't, the way books do it
      (only the PDF uses these rules) */
   @page { @bottom-center { content: counter(page); font-family: ${exportBodyFont()}; font-size: 9pt; color: #777; } }
-  @page front { @bottom-center { content: none; } }
+  @page front { counter-increment: page 0; @bottom-center { content: none; } }
+  @page quiet { @bottom-center { content: none; } }
   .coverpage, .titlepage, .page, .contents { page: front; }
+  .page.counted { page: quiet; }
+  /* (the link that tells the printer where page 1 is, unseen) */
+  .contents .p1-ref { position: absolute; color: transparent; font-size: 1px; text-decoration: none; }
 </style></head><body>
 ${opts.cover ? `<div class="coverpage"><img src="data:${opts.cover.mime};base64,${opts.cover.base64}" alt="${t('Cover')}"/></div>` : ''}
 <div class="titlepage"><h1>${escHtml(d.title)}</h1>
@@ -12771,9 +16535,27 @@ const escXml = (s) => String(s)
 // In the manuscript an italic inside an italic is emphasis in a poetry
 // paragraph (itself one italic), and it is set upright, the typesetter's
 // way (flip). Pasted HTML often doubles its italics for nothing; not there.
+// Footnotes in the exports (FOOTNOTES): numbered through the whole book, as
+// on the page. A paragraph's html carries each marker as runHtml wrote it;
+// FN_HTML finds them, its first group the note (attribute-escaped).
+const FN_HTML = /<span class="fn" data-note="([^"]*)" contenteditable="false">\u200B<\/span>/g;
+// the notes in the sections before this one: where its numbers start
+const fnBefore = (d, ch) => d.sections.slice(0, Math.max(0, d.sections.indexOf(ch)))
+  .reduce((n, sec) => n + sec.paras.reduce((m, p) => m + ((p.html || '').match(FN_HTML) || []).length, 0), 0);
+// a section's paragraphs with each marker swapped for what a format sets
+// there; mark(note, n) gets the note (attribute-escaped) and its number
+function fnParas(paras, start, mark) {
+  const notes = [];
+  const out = paras.map((p) => (p.html && p.html.includes('class="fn"')
+    ? { ...p, html: p.html.replace(FN_HTML, (m, note) => { notes.push(note); return mark(note, start + notes.length); }) }
+    : p));
+  return { paras: out, notes };
+}
+
 // a run's text in the manuscript's own inline tags
 function runHtml(r, esc = escHtml) {
   if (r.br) return '<br>';
+  if (r.fn !== undefined) return `<span class="fn" data-note="${escAttr(r.fn)}" contenteditable="false">\u200B</span>`;
   let t = esc(r.text);
   if (r.s) t = '<s>' + t + '</s>';
   if (r.u) t = '<u>' + t + '</u>';
@@ -12812,6 +16594,51 @@ function healStrayNbsp(root) {
   }
   return changed;
 }
+// ---- non-breaking marks: the characters a wrap must not break at, and the
+// range rule behind the Format menu's Non-Breaking Marks option. The three are
+// U+00A0 no-break space, U+202F narrow no-break space and U+2011 no-break
+// hyphen; all get the same unobtrusive light gray, the way Word and
+// LibreOffice show them — one "this character is special", not a colour code.
+// A streak of the same character is one run.
+const NB_CHARS = { '\u00a0': 'space', '\u202f': 'narrow', '\u2011': 'hyphen' };
+function nonBreakingRuns(text) {
+  const runs = [];
+  let i = 0;
+  while (i < text.length) {
+    const kind = NB_CHARS[text[i]];
+    if (!kind) { i += 1; continue; }
+    let j = i + 1;
+    while (j < text.length && text[j] === text[i]) j += 1;
+    runs.push({ start: i, end: j, kind });
+    i = j;
+  }
+  return runs;
+}
+
+// Paints those characters in every open chapter with the CSS Highlight API,
+// so the marks never enter the chapter HTML — the same door search,
+// spellcheck and focus use. Off means nothing is painted at all.
+const NB_MARK_NAME = 'neo-nb-mark';
+function paintNonBreakingMarks() {
+  if (!(window.CSS && CSS.highlights && window.Highlight)) return;
+  CSS.highlights.delete(NB_MARK_NAME);
+  if (!nbspMarksEnabled) return;
+  const marks = new Highlight();
+  for (const body of $$('#chapters .chapter-body')) {
+    const walk = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+    let node;
+    while ((node = walk.nextNode())) {
+      for (const run of nonBreakingRuns(node.data)) {
+        const range = document.createRange();
+        range.setStart(node, run.start);
+        range.setEnd(node, run.end);
+        marks.add(range);
+      }
+    }
+  }
+  CSS.highlights.set(NB_MARK_NAME, marks);
+}
+// ---- end of non-breaking marks ----
 function paraRuns(pHtml, flip) {
   const holder = document.createElement('template'); // inert: nothing loads or runs
   holder.innerHTML = pHtml;
@@ -12824,6 +16651,11 @@ function paraRuns(pHtml, flip) {
       } else if (child.nodeType === Node.ELEMENT_NODE) {
         if (child.classList && child.classList.contains('ph-mark')) {
           runs.push({ mark: child.dataset.sid || '' });
+          continue;
+        }
+        // a footnote: its words, no text of its own on the line
+        if (child.classList && child.classList.contains('fn')) {
+          runs.push({ fn: child.dataset.note || '', text: '' });
           continue;
         }
         const tag = child.tagName;
@@ -12856,6 +16688,8 @@ function paraRuns(pHtml, flip) {
 
 /* ---------- DOCX ---------- */
 
+// a Word export's footnotes, gathered as docxP meets them (buildDocxEntries)
+let docxNotes = null;
 function docxP(runs, opts = {}) {
   // the schema wants a paragraph's properties in this order
   const pPr = [];
@@ -12871,6 +16705,11 @@ function docxP(runs, opts = {}) {
   if (opts.align) pPr.push(`<w:jc w:val="${opts.align}"/>`);
   const rXml = runs.map((r) => {
     if (r.br) return '<w:r><w:br/></w:r>';
+    if (r.fn !== undefined) {
+      if (!docxNotes) return '';
+      docxNotes.push(r.fn);
+      return `<w:r><w:rPr><w:rStyle w:val="FootnoteReference"/></w:rPr><w:footnoteReference w:id="${docxNotes.length}"/></w:r>`;
+    }
     const it = opts.flip ? !r.i : r.i;
     const caps = r.caps !== undefined ? r.caps : opts.caps;
     const size = r.size || opts.size;
@@ -12890,6 +16729,16 @@ function docxP(runs, opts = {}) {
 }
 
 function buildDocxEntries(data) {
+  docxNotes = [];
+  try { return docxEntriesOf(data); } finally { docxNotes = null; }
+}
+// Word's footnotes part: the two separators Word expects, then the notes
+function docxFootnotesXml(notes) {
+  const sep = (id, type, tag) => `<w:footnote w:type="${type}" w:id="${id}"><w:p><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:${tag}/></w:r></w:p></w:footnote>`;
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">${sep(-1, 'separator', 'separator')}${sep(0, 'continuationSeparator', 'continuationSeparator')}${notes.map((n, i) => `<w:footnote w:id="${i + 1}"><w:p><w:pPr><w:pStyle w:val="FootnoteText"/></w:pPr><w:r><w:rPr><w:rStyle w:val="FootnoteReference"/></w:rPr><w:footnoteRef/></w:r><w:r><w:t xml:space="preserve"> ${escXml(n)}</w:t></w:r></w:p></w:footnote>`).join('')}</w:footnotes>`;
+}
+function docxEntriesOf(data) {
   const d = data || bookExportData();
   const body = [];
   // headings carry Word's own heading styles, so the navigation pane and a
@@ -12982,14 +16831,18 @@ ${[1, 2, 3].map(headingStyle).join('\n')}
 ${chr('Emphasis', 'Emphasis', '<w:i/>')}
 ${chr('Strong', 'Strong', '<w:b/>')}
 ${chr('StrongEmphasis', 'Strong Emphasis', '<w:b/><w:i/>')}
+${para('FootnoteText', 'footnote text', '<w:spacing w:after="0" w:line="240" w:lineRule="auto"/>', 'FootnoteText', '<w:sz w:val="20"/>')}
+${chr('FootnoteReference', 'footnote reference', '<w:vertAlign w:val="superscript"/>')}
 </w:styles>`;
+  const notes = docxNotes.length ? docxNotes : null;
   return [
     { path: '[Content_Types].xml', content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
 <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
 <Default Extension="xml" ContentType="application/xml"/>
 <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
-<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
+<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>${notes ? `
+<Override PartName="/word/footnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/>` : ''}
 </Types>` },
     { path: '_rels/.rels', content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
@@ -12997,10 +16850,12 @@ ${chr('StrongEmphasis', 'Strong Emphasis', '<w:b/><w:i/>')}
 </Relationships>` },
     { path: 'word/_rels/document.xml.rels', content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>${notes ? `
+<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes" Target="footnotes.xml"/>` : ''}
 </Relationships>` },
     { path: 'word/document.xml', content: documentXml },
-    { path: 'word/styles.xml', content: stylesXml }
+    { path: 'word/styles.xml', content: stylesXml },
+    ...(notes ? [{ path: 'word/footnotes.xml', content: docxFootnotesXml(notes) }] : [])
   ];
 }
 
@@ -13027,8 +16882,16 @@ const EPUB_TYPES = {
 
 function chapterXhtml(ch, d) {
   const kind = ch.kind || 'chapter';
+  // footnotes: the number is a link a reading app opens as a pop-up note
+  let fnN = fnBefore(d, ch);
+  const notes = [];
   const xhtmlRuns = (p) => paraRuns(p.html).map((r) => {
     if (r.br) return '<br/>';
+    if (r.fn !== undefined) {
+      notes.push(r.fn);
+      fnN += 1;
+      return `<sup class="fnref"><a epub:type="noteref" href="#fn${fnN}" id="fnr${fnN}">${fnN}</a></sup>`;
+    }
     let t = escXml(r.text);
     if (r.s) t = '<s>' + t + '</s>';
     if (r.u) t = '<u>' + t + '</u>';
@@ -13075,6 +16938,12 @@ ${ch.subtitle ? `<p class="sub">${escXml(ch.subtitle)}</p>` : ''}${ch.byline ? `
     inner = `<section epub:type="${EPUB_TYPES[kind] || ch.role || 'chapter'}">${ch.heading ? `<h1>${escXml(ch.heading)}</h1>` : ''}${ch.byline ? `<p class="byline">${escXml(ch.byline)}</p>` : ''}
 ${paras}
 </section>`;
+  }
+  if (notes.length) {
+    const first = fnN - notes.length + 1;
+    const asides = notes.map((n, i) => `<aside epub:type="footnote" id="fn${first + i}" class="footnote"><p><a href="#fnr${first + i}">${first + i}</a>&#8194;${escXml(n)}</p></aside>`).join('\n');
+    const at = inner.lastIndexOf('</section>');
+    inner = inner.slice(0, at) + `<div class="notes">\n${asides}\n</div>\n` + inner.slice(at);
   }
   // the language on the page too, so a reader hyphenates in the right one
   const lang = escXml(d.language || NeoI18n.getLocale());
@@ -13179,6 +17048,10 @@ ${navList(toc)}
 <navPoint id="titlepage" playOrder="1"><navLabel><text>${escXml(t('Title Page'))}</text></navLabel><content src="title.xhtml"/></navPoint>${ncxPoints(toc)}
 </navMap></ncx>` },
     { path: 'OEBPS/style.css', content: `body { font-family: serif; line-height: 1.5; margin: 1em; }
+sup.fnref { font-size: 0.7em; line-height: 0; vertical-align: super; }
+sup.fnref a, .footnote a { text-decoration: none; }
+.notes { margin-top: 2.5em; border-top: 1px solid #999; padding-top: 0.5em; font-size: 0.85em; }
+.notes p { text-indent: 0; text-align: left; margin: 0 0 0.4em; }
 h1 { text-align: center; font-weight: normal; letter-spacing: 0.2em; text-transform: uppercase; font-size: 1.2em; margin: 3em 0 2em; }
 p { text-indent: 1.2em; margin: 0; text-align: justify; -webkit-hyphens: auto; -epub-hyphens: auto; hyphens: auto; widows: 2; orphans: 2; }
 h1, p.brk { -webkit-hyphens: none; -epub-hyphens: none; hyphens: none; }
@@ -13539,6 +17412,8 @@ async function exportFromShelf(bookId, format) {
 
 async function doExport(format, chId = null) {
   if (!book) { toast(t('Open a book first')); return; }
+  if (format === 'paperback') { await printPaperback(); return; }
+  if (format === 'manuscript') { await exportManuscript(); return; }
   // a script leaves as a PDF set the way scripts print, or as Fountain
   if (isScript()) { await spExport(['pdf', 'fdx'].includes(format) ? format : 'fountain'); return; }
   flushAllSaves();
@@ -13567,8 +17442,9 @@ async function doExport(format, chId = null) {
 }
 
 function chooseEmailMethod() {
-  // Apple Mail only exists on Macs; elsewhere Gmail
-  if (!navigator.platform.toLowerCase().includes('mac')) return Promise.resolve('gmail');
+  // Gmail opens in the browser, which is no help to a writer with no Gmail
+  // account (#386): every computer is offered its own mail program too
+  const mac = navigator.platform.toLowerCase().includes('mac');
   return new Promise((resolve) => {
     const bd = document.createElement('div');
     bd.className = 'modal-backdrop';
@@ -13580,9 +17456,13 @@ function chooseEmailMethod() {
             <strong>Gmail</strong>
             <span>${t('Opens a pre-filled compose window in your browser. NEO shows you the PDF to drag into it.')}</span>
           </button>
-          <button class="fr-choice" data-m="mail">
+          ${mac ? `<button class="fr-choice" data-m="mail">
             <strong>Apple Mail</strong>
             <span>${t('Fully automatic — the PDF is attached and addressed. Just hit send.')}</span>
+          </button>` : ''}
+          <button class="fr-choice" data-m="mailto">
+            <strong>${t('Your mail program')}</strong>
+            <span>${t('Opens a new message in the program your computer uses for email. NEO shows you the PDF to attach.')}</span>
           </button>
         </div>
       </div>`;
@@ -13618,12 +17498,12 @@ async function doEmailDraft() {
     if (!ok) return;
   }
   const total = bookWordCount();
-  const subject = t('NEO draft — {title} — {n} words — {date}', { title: book.title, n: total, date: fmtDate(new Date()) });
+  const subject = t('NEO draft — {title} — {n} words — {date}', { title: shownTitle(book.title), n: total, date: fmtDate(new Date()) });
   const hash = await manuscriptHash();
-  const body = t('Draft snapshot of “{title}” — {n} words.', { title: book.title, n: total }) + '\n'
+  const body = t('Draft snapshot of “{title}” — {n} words.', { title: shownTitle(book.title), n: total }) + '\n'
     + t('Sent from NEO on {date}.', { date: new Date().toLocaleString(NeoI18n.getLocale()) }) + '\n\n'
     + t('SHA-256 fingerprint of the manuscript text:') + `\n${hash}\n\n`
-    + (library.emailMethod === 'gmail'
+    + (library.emailMethod === 'gmail' || library.emailMethod === 'mailto'
       ? t('The PDF snapshot is in the Finder window NEO just opened — drag it into this email before sending.')
       : t('PDF snapshot attached.'));
   toast(t('Preparing your draft…'));
@@ -13640,6 +17520,7 @@ async function doEmailDraft() {
     method: library.emailMethod
   });
   if (res.method === 'gmail') toast(t('Gmail compose opened — drag in the PDF NEO revealed, then send'), 8000);
+  else if (res.method === 'mailto') toast(t('Your mail program opened — attach the PDF NEO revealed, then send'), 8000);
   else if (res.ok) toast(t('Draft handed to Mail — hit send for your timestamp'));
   else toast(t('Mail unavailable — snapshot saved to your Exports folder instead'));
 }
@@ -13778,15 +17659,17 @@ async function showAbout() {
 // Text size and the reset travel with page zoom; the menu item and the
 // keyboard fallback share this so the two cannot drift.
 async function setEditorFontSize(value) {
-  // ⌘+ and ⌘− on the outline's cards make the cards larger and smaller
+  // ⌘+ and ⌘− on the shelf make the covers larger and smaller
+  if (shelfShowing()) { stepShelfZoom(value); return; }
+  // …on the outline's cards, the cards
   if (boardShowing()) { stepCardZoom(value); return; }
   // a script's type is the page's: larger and smaller zoom the page
   if (book && isScript()) {
-    setPageZoom(value === 0 ? 1 : activePageZoom() * (value > 0 ? 1.1 : 1 / 1.1));
+    setPageZoom(value === 0 ? 1 : tenth(activePageZoom() + (value > 0 ? 0.1 : -0.1)));
     return;
   }
   const cur = library.editorFontSize || 17;
-  library.editorFontSize = value === 0 ? 17 : Math.min(22, Math.max(14, cur + value));
+  library.editorFontSize = value === 0 ? 17 : Math.min(EDITOR_SIZE_MAX, Math.max(EDITOR_SIZE_MIN, cur + value));
   if (value === 0) rememberZoom(pageZoomKey(), 1); // ⌘0 resets this mode's pinch zoom too
   await writeLibrary(library);
   keepReadingPlace(applyFonts);
@@ -13812,6 +17695,7 @@ window.neo.onMenu(async (msg) => {
   if (msg.type === 'scriptElement' && book && isScript()) spSetElement(msg.value);
   if (msg.type === 'scriptStyle') spToggleStyle(msg.value);
   if (msg.type === 'scriptPageBreak') spTogglePageBreak();
+  if (msg.type === 'moreFeatures') await setMoreFeatures(!!msg.checked);
   if (msg.type === 'markdownEmphasis') {
     if (msg.checked) delete library.markdownOff; else library.markdownOff = true;
     await writeLibrary(library);
@@ -13822,16 +17706,22 @@ window.neo.onMenu(async (msg) => {
     await writeLibrary(library);
   }
   if (msg.type === 'emailDraft') doEmailDraft();
+  if (msg.type === 'snapshot' && book && !$('#editor-view').hidden) snapshotNow();
   if (msg.type === 'emailSettings') emailSettings();
   if (msg.type === 'find') openSearch();
   if (msg.type === 'spellcheck') toggleSpellcheck();
   if (msg.type === 'spellLanguage') changeSpellLanguage(msg.value);
   if (msg.type === 'reshelve') reshelveBook();
   if (msg.type === 'typewriter') toggleTypewriter();
+  if (msg.type === 'nbspMarks') toggleNbspMarks();
+  if (msg.type === 'pagedView') togglePaged();
+  if (msg.type === 'pageWidth') setPageWidth(msg.value);
+  if (msg.type === 'twoPageView') toggleTwoPage();
   if (msg.type === 'vim') toggleVim();
   if (msg.type === 'focus') setFocus(msg.value);
   if (msg.type === 'focusCycle') cycleFocus();
   if (msg.type === 'import') importBooks();
+  if (msg.type === 'importChapters') importChapters();
   if (msg.type === 'stats') openStats();
   if (msg.type === 'chapterStep') gotoChapter(msg.value);
   if (msg.type === 'writingStyle') {
@@ -13852,10 +17742,13 @@ window.neo.onMenu(async (msg) => {
     try { if (book && !$('#editor-view').hidden) sessionStorage.setItem('neo-reopen', book.id); } catch { /* a nicety */ }
     setTimeout(() => window.neo.reloadForLanguage(), 400);
   }
-  if (msg.type === 'uiZoom') {
-    library.uiZoom = msg.value;
-    await writeLibrary(library);
-    applyFonts();
+  if (msg.type === 'uiZoomStep') {
+    const next = nextZoomStep(library.uiZoom, msg.value);
+    if (next !== snapZoom(library.uiZoom)) {
+      library.uiZoom = next;
+      await writeLibrary(library);
+      applyFonts();
+    }
   }
   if (msg.type === 'uiBright') {
     // the tab you're on decides which of the two settings this is
@@ -14142,13 +18035,92 @@ $('#nav-list').addEventListener('keydown', (e) => {
 });
 
 /* ================================================================== */
+/*  SIMPLE NEO — File → Show More Features                             */
+/*  NEO opens simple. The switch brings back everything else: the      */
+/*  menu items main.js marks `more`, and the keys and right-click      */
+/*  choices here that ask moreOn(). A library from before the switch   */
+/*  is decided once: on for a writer already using something behind    */
+/*  it, so nothing they rely on goes out of sight; off for the rest,   */
+/*  who are told once where it went. A new library starts simple.      */
+/* ================================================================== */
+
+// what a library's own settings show the writer chose (the books are
+// looked at separately: a script, a painted cover)
+function usesMoreFeatures(lib) {
+  if (!lib) return false;
+  const lang = (code) => String(code || '').split('-')[0];
+  return (lib.authors || []).length > 1 ||
+    (lib.shelves || []).some((s) => isBound(s)) ||
+    !!lib.vimKeys || !!lib.nbspMarks || !!lib.pagedView ||
+    (!!lib.pageWidth && lib.pageWidth !== 'regular') ||
+    (lib.uiZoom !== undefined && snapZoom(lib.uiZoom) !== 1) ||
+    (!!lib.focus && lib.focus !== 'off') ||
+    lib.uiBright !== undefined || lib.uiBrightAside === false ||
+    !!lib.markdownOff || !!lib.exportCustomChapterTitles ||
+    (!!lib.spellLanguage && lang(lib.spellLanguage) !== lang(NeoI18n.getLocale()));
+}
+
+async function decideMoreFeatures() {
+  if (IS_POCKET || typeof library.moreFeatures === 'boolean') { reportMore(); return; }
+  let more = false;
+  if (library.firstRunDone) {
+    more = usesMoreFeatures(library);
+    for (const s of more ? [] : library.shelves || []) {
+      for (const id of s.bookIds || []) {
+        const meta = await shelfMeta(id);
+        if (meta && (isScript(meta) || hasPainting(meta))) { more = true; break; }
+      }
+      if (more) break;
+    }
+    if (!more) more = !!(await window.neo.hasSecret(coverProvider()).catch(() => false));
+    if (!more) setTimeout(() => toast(t('NEO is simpler now. File → Show More Features brings back the rest.'), 9000), 1500);
+  }
+  library.moreFeatures = more;
+  await writeLibrary(library);
+  reportMore();
+}
+
+function reportMore() {
+  if (window.neo.moreState) window.neo.moreState(moreOn());
+}
+
+async function setMoreFeatures(on) {
+  if (IS_POCKET || on === moreOn()) return; // (Pocket is always simple)
+  library.moreFeatures = on;
+  await writeLibrary(library);
+  reportMore();
+  applyLook();
+  if (book && !$('#editor-view').hidden) {
+    if (currentTab === 'manuscript') queueSideCards();
+    else switchTab(currentTab); // the Outline's view, the Notes pages, the right-hand pane
+  }
+  toast(on ? t('More features on') : t('Simple NEO. File → Show More Features brings back the rest.'));
+}
 
 loadLibrary().then(() => {
-  applyFonts();
+  applyLook();
   typewriterEnabled = !!library.typewriter;
   applyTypewriter();
-  vimEnabled = !!library.vimKeys;
-  applyVim();
-  focusLevel = FOCUS_LEVELS.includes(library.focus) ? library.focus : 'off';
-  applyFocus();
+  // the voices load on the first ask, which on Linux can take a moment: ask
+  // now, so they are there by the time Read Aloud is (#378)
+  try { if (window.speechSynthesis) window.speechSynthesis.getVoices(); } catch { /* none to ask */ }
 });
+
+// The look that Show More Features governs: at launch, and again whenever
+// the switch turns. Simple NEO takes NEO's defaults for these and leaves
+// the writer's own choices in the library for the switch's return.
+function applyLook() {
+  const more = moreOn();
+  applyFonts(); // the interface size and brightness
+  nbspMarksEnabled = more && !!library.nbspMarks;
+  applyNbspMarks();
+  applyPageWidth();
+  pagedEnabled = more && !!library.pagedView;
+  twoPageEnabled = more && !!library.twoPageView;
+  applyPageZoom(); // the page zoom's range depends on the pages
+  applyPaged();
+  vimEnabled = more && !!library.vimKeys;
+  applyVim();
+  focusLevel = more && FOCUS_LEVELS.includes(library.focus) ? library.focus : 'off';
+  applyFocus();
+}

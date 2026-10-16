@@ -101,6 +101,12 @@ describe('import', () => {
     assert.deepEqual(texts(r), [['It began.'], ['It ended.']]);
   });
 
+  test('Korean headings: 제N장, 프롤로그 and a bare 3장 line start chapters; a sentence that opens with 3장 stays prose', async () => {
+    const r = await importOne('ko.txt', ['프롤로그', '비가 왔다.', '제1장', '그는 떠났다.', '3장', '3장 남았다.', '에필로그', '끝났다.', ''].join('\n'));
+    assert.deepEqual(texts(r), [['비가 왔다.'], ['그는 떠났다.'], ['3장 남았다.'], ['끝났다.']]);
+    assert.deepEqual(JSON.parse(JSON.stringify(r.chapters.map((c) => c.role || null))), ['prologue', null, null, 'epilogue']);
+  });
+
   test('Word in another language: a localized heading style still starts a chapter', async () => {
     const r = await importOne('de.docx', await docx([
       '<w:p><w:pPr><w:pStyle w:val="berschrift1"/></w:pPr><w:r><w:t>Der Anfang</w:t></w:r></w:p>',

@@ -41,6 +41,23 @@ test('the Hungarian dictionary takes every accusative (könyvet, szívet, évet)
   for (const [word, ok] of Object.entries(res.result)) assert.equal(ok, true, word);
 });
 
+test('Swedish: accents, inflections, compounds, suggestions and dictionary changes', async () => {
+  const send = spellWorker();
+  const dir = path.join(root, 'node_modules/dictionary-sv');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'package.json'))).version, '4.0.0');
+  assert.equal((await send({ type: 'load', language: 'sv', dir })).ok, true);
+  const good = await send({ type: 'check', words: ['författare', 'böcker', 'huset', 'smörgåsar', 'räksmörgås', 'sjuksköterska', 'överraskning'] });
+  for (const [word, ok] of Object.entries(good.result)) assert.equal(ok, true, word);
+  const bad = await send({ type: 'check', words: ['förfatatre', 'sjuksköterskka', 'smörgåss'] });
+  for (const [word, ok] of Object.entries(bad.result)) assert.equal(ok, false, word);
+  assert.ok((await send({ type: 'suggest', word: 'förfatatre' })).result.includes('författare'));
+  assert.equal((await send({ type: 'load', language: 'en-US', dir: path.join(root, 'node_modules/dictionary-en-us') })).ok, true);
+  assert.equal((await send({ type: 'check', words: ['hello'] })).result.hello, true);
+  assert.equal((await send({ type: 'load', language: 'sv', dir })).ok, true);
+  assert.equal((await send({ type: 'check', words: ['hello', 'författare'] })).result.hello, false);
+  assert.equal((await send({ type: 'check', words: ['författare'] })).result.författare, true);
+});
+
 function spellWorker() {
   let handle, reply;
   const context = vm.createContext({
@@ -244,7 +261,7 @@ test('spellcheck follows the interface until a dictionary is picked; nothing is 
   }
 
   // a dictionary picked in Edit → Spellcheck Language wins, whatever the interface
-  for (const code of ['en-US', 'en-GB', 'fr', 'ro']) {
+  for (const code of ['en-US', 'en-GB', 'fr', 'ro', 'sv']) {
     const explicit = mainContext(temp, 'ro-RO', {}, { spellLanguage: code });
     assert.equal(explicit.loads[0].language, code);
     assert.equal(explicit.read().spellLanguage, code);

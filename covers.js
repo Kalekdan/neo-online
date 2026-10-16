@@ -439,7 +439,9 @@ const NeoCovers = (() => {
     const r = rng(hash('type:' + seed));
     const template = pick(r, TEMPLATES);
     const entry = art || paintAbstract(seed);
-    const title = meta.title || 'Untitled';
+    // a book still named the English default shows it in the interface
+    // language (breakLines sets that), as app.js's isUntitled() reads it
+    const title = meta.title && meta.title !== 'Untitled' ? meta.title : '';
     const laid = layout(title, template);
     const reg = regions(template, laid.height);
     const ink = inkFor(entry.canvas, reg.title);

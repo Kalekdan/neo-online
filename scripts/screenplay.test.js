@@ -157,7 +157,7 @@ test('Fountain in: a block\'s lines run on into one paragraph; a PDF\'s page fur
 
 test('Fountain\'s title page and emphasis', () => {
   const src = 'Title:\n    _**NO WIND**_\nCredit: Written by\nAuthor: Hugh Howey\nDraft date: First Draft\nContact:\n    Kristin Nelson\n    Nelson Literary Agency\n\nEXT. A - DAY';
-  assert.deepEqual(plain(sp.spFountainTitle(src)), { title: 'NO WIND', credit: 'Written by', author: 'Hugh Howey', draft: 'First Draft', contact: 'Kristin Nelson\nNelson Literary Agency' });
+  assert.deepEqual(plain(sp.spFountainTitle(src)), { title: 'NO WIND', titleStyle: { b: true, u: true }, credit: 'Written by', author: 'Hugh Howey', draft: 'First Draft', contact: 'Kristin Nelson\nNelson Literary Agency' });
   assert.deepEqual(plain(sp.spFountainTitle('EXT. A - DAY')), {});
   const r = (t) => plain(sp.spRunsFromFountain(t)).map((x) => (x.b ? 'B' : '') + (x.i ? 'I' : '') + (x.u ? 'U' : '') + ':' + x.text);
   assert.deepEqual(r('He *really* means it.'), [':He ', 'I:really', ': means it.']);
@@ -228,4 +228,20 @@ test('Final Draft out, then in again: the same script', () => {
     'dialogue:Now.', 'transition:CUT TO:', 'shot:CLOSE ON THE BELL'
   ]);
   assert.deepEqual(back.title, { ...tp, title: 'NO WIND' });
+});
+
+test('a bold, underlined title travels through Fountain and Final Draft and comes back', () => {
+  const tp = { title: 'No Wind', titleStyle: { b: true, u: true }, credit: 'Written by', author: 'Hugh Howey' };
+  const lines = [{ type: 'heading', text: 'EXT. DOCK - DAY', runs: [{ text: 'EXT. DOCK - DAY' }] }];
+  const ftn = sp.spToFountain(lines, tp);
+  assert.match(ftn, /^Title: _\*\*No Wind\*\*_$/m);
+  assert.deepEqual(plain(sp.spFountainTitle(ftn)).titleStyle, { b: true, u: true });
+  assert.equal(sp.spFountainTitle(ftn).title, 'No Wind');
+  const xml = sp.spToFdx(lines, tp);
+  assert.match(xml, /<Text Style="Bold\+Underline">NO WIND<\/Text>/);
+  assert.deepEqual(plain(sp.spFromFdx(xml).title.titleStyle), { b: true, u: true });
+  // a plain title stays plain, and a mark in the title stays a mark
+  assert.match(sp.spToFountain(lines, { title: 'A*B' }), /^Title: A\*B$/m);
+  assert.match(sp.spToFountain(lines, { title: 'A*B', titleStyle: { i: true } }), /^Title: \*A\\\*B\*$/m);
+  assert.equal(sp.spFountainTitle(sp.spToFountain(lines, { title: 'Plain' })).titleStyle, undefined);
 });
