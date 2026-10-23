@@ -2177,6 +2177,9 @@ function createWindow() {
     // menu bar lives in that frame (KDE Plasma showed no menu, and Alt
     // found nothing to show)
     ...(process.platform === 'darwin' ? { titleBarStyle: 'hiddenInset' } : {}),
+    // Linux shows the window's own icon in its title bar and task bar; an
+    // AppImage has no installed one to fall back on (#440)
+    ...(process.platform === 'linux' ? { icon: path.join(__dirname, 'build', 'icon.png') } : {}),
     backgroundColor: roomColor(libraryPageTheme()),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -2739,11 +2742,13 @@ function buildMenu() {
         {
           visible: !scriptState.on,
           label: t('Drop Cap Style'),
+          // one radio group, so no separator before Off: Electron starts a new group at a
+          // separator and ticks the first item of a group with nothing checked, so Off on its
+          // own was ticked beside the style in use (#422)
           submenu: [
             { label: t('Literary'), type: 'radio', checked: viewState.dropCap === 'literary', click: () => sendToWindow({ type: 'dropCap', value: 'literary' }) },
             { label: t('Fantasy'), type: 'radio', checked: viewState.dropCap === 'fantasy', click: () => sendToWindow({ type: 'dropCap', value: 'fantasy' }) },
             { label: t('Sci-Fi'), type: 'radio', checked: viewState.dropCap === 'scifi', click: () => sendToWindow({ type: 'dropCap', value: 'scifi' }) },
-            { type: 'separator' },
             { label: t('Off'), type: 'radio', checked: viewState.dropCap === 'none', click: () => sendToWindow({ type: 'dropCap', value: 'none' }) }
           ]
         },

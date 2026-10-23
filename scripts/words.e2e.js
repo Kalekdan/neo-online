@@ -365,6 +365,120 @@ test('a thousand random edits keep the count true', async () => {
   assert.equal(bad, null);
 });
 
+/* ---------- today's count: words read from disk aren't today's (#345) ---------- */
+
+// The library is synced between two computers. Each book below comes in on
+// disk the way the other one leaves it, and today's count is read off the
+// screen.
+const LIB = path.join(tmp, 'NEO Library');
+const many = (n, word) => Array.from({ length: n }, () => word).join(' ');
+const folder = (id) => path.join(LIB, fs.readdirSync(LIB).find((d) => d.endsWith(id)));
+const bookJson = (id) => JSON.parse(fs.readFileSync(path.join(folder(id), 'book.json'), 'utf8'));
+const chapterFile = (id, i) => path.join(folder(id), 'chapters', bookJson(id).chapterOrder[i] + '.html');
+const TWO = [{ title: 'One', paras: [{ text: many(60, 'rain') }] }, { title: 'Two', paras: [{ text: many(2000, 'sea') }] }];
+async function shelvedBook(name, chapters) {
+  return js(`(async () => {
+    if (book) await backToShelf();
+    await addImportedBooks([{ name: ${JSON.stringify(name)}, chapters: ${JSON.stringify(chapters)} }], library.shelves[0]);
+    const ids = library.shelves[0].bookIds;
+    return ids[ids.length - 1];
+  })()`);
+}
+async function open(id) {
+  await js(`openBook(${JSON.stringify(id)})`);
+  await tick(500);
+}
+async function lookAtDisk() {
+  await js(`refreshFromDisk()`);
+  await tick(500);
+}
+
+test('a chapter still syncing when the book opened adds nothing to today', async () => {
+  const id = await shelvedBook('Syncing', TWO);
+  const file = chapterFile(id, 1);
+  const words = fs.readFileSync(file, 'utf8');
+  fs.unlinkSync(file);
+  await open(id);
+  assert.equal(await text('goal-counter'), '0 today');
+  fs.writeFileSync(file, words);
+  await lookAtDisk();
+  assert.equal(await js('bookWordCount()'), 2060);
+  assert.equal(await text('goal-counter'), '0 today');
+});
+
+test('words written today on the other computer stay today\'s; a late chapter adds none', async () => {
+  const id = await shelvedBook('Two computers', TWO);
+  const meta = bookJson(id);
+  meta.dailyCounts = { [await js('todayStr()')]: { start: 1660, end: 2060 } }; // 400 written there
+  fs.writeFileSync(path.join(folder(id), 'book.json'), JSON.stringify(meta));
+  const file = chapterFile(id, 1);
+  const words = fs.readFileSync(file, 'utf8');
+  fs.unlinkSync(file);
+  await open(id);
+  assert.equal(await text('goal-counter'), '400 today');
+  await tick(3200); // longer than a slow cloud read takes
+  await caretAtEnd();
+  await type(' gulls');
+  assert.equal(await text('goal-counter'), '401 today');
+  fs.writeFileSync(file, words);
+  await lookAtDisk();
+  assert.equal(await text('goal-counter'), '401 today');
+});
+
+test('the other computer\'s copy of a chapter, kept beside it, adds nothing to today', async () => {
+  const id = await shelvedBook('Both changed', [{ title: 'One', paras: [{ text: many(1200, 'reef') }] }]);
+  await open(id);
+  await caretAtEnd();
+  await type(' gulls');
+  fs.writeFileSync(chapterFile(id, 0), '<p>' + many(1200, 'reef') + ' moon</p>');
+  await tick(1500); // the save finds their version and keeps it as the next chapter
+  assert.equal(await js('book.chapterOrder.length'), 2);
+  assert.equal(await text('goal-counter'), '1 today');
+});
+
+test('the other computer counting more today is taken in, and typing adds to it', async () => {
+  const id = await shelvedBook('Both open', [{ title: 'One', paras: [{ text: many(500, 'dune') }] }]);
+  await open(id);
+  const meta = bookJson(id);
+  meta.dailyCounts = { [await js('todayStr()')]: { start: 100, end: 400 } };
+  fs.writeFileSync(path.join(folder(id), 'book.json'), JSON.stringify(meta));
+  await lookAtDisk();
+  assert.equal(await text('goal-counter'), '300 today');
+  await caretAtEnd();
+  await type(' gulls');
+  assert.equal(await text('goal-counter'), '301 today');
+});
+
+// A part isn't the story's words, so making a chapter one takes its words out
+// of the count and back makes them count again: neither is writing (#436).
+test('a chapter made a part, and back, adds nothing to today', async () => {
+  const id = await shelvedBook('Parts', TWO);
+  await open(id);
+  assert.equal(await text('goal-counter'), '0 today');
+  const second = await js('book.chapterOrder[1]');
+  const makeIt = (kind) => js(`(async () => {
+    const real = window.popMenu;
+    window.popMenu = async () => ${JSON.stringify(kind)};
+    try { await chapterMenu(${JSON.stringify(second)}, 10, 10); } finally { window.popMenu = real; }
+  })()`);
+  await makeIt('part');
+  assert.equal(await js('bookWordCount()'), 60);
+  assert.equal(await text('goal-counter'), '0 today');
+  await makeIt('chapter');
+  assert.equal(await js('bookWordCount()'), 2060);
+  assert.equal(await text('goal-counter'), '0 today');
+  // taking the change back (⌘Z) and doing it again (⇧⌘Z) is no writing either
+  await makeIt('part');
+  await js('structuralUndo()');
+  await tick(400);
+  assert.equal(await js('bookWordCount()'), 2060);
+  assert.equal(await text('goal-counter'), '0 today');
+  await js('structuralRedo()');
+  await tick(400);
+  assert.equal(await js('bookWordCount()'), 60);
+  assert.equal(await text('goal-counter'), '0 today');
+});
+
 /* ---------- runner ---------- */
 
 async function main() {
