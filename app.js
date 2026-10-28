@@ -18406,7 +18406,10 @@ async function decideMoreFeatures() {
       }
       if (more) break;
     }
-    if (!more) more = !!(await window.neo.hasSecret(coverProvider()).catch(() => false));
+    // Robust secret check: ensure hasSecret returns a promise
+    let secretValue = (window.neo && window.neo.hasSecret) ? window.neo.hasSecret(coverProvider()) : false;
+    let secretPromise = secretValue instanceof Promise ? secretValue : Promise.resolve(secretValue);
+    more = !!(await secretPromise.catch(() => false));
     if (!more) setTimeout(() => toast(t('NEO is simpler now. File → Show More Features brings back the rest.'), 9000), 1500);
   }
   library.moreFeatures = more;
